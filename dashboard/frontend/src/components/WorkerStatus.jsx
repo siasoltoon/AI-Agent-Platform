@@ -1,8 +1,14 @@
+import { getWorkers } from "../api/workers";
+
 export default function WorkerStatus() {
+  async function refreshWorkers() {
+    await getWorkers();
+  }
+
   return (
     <section>
       <h2>Worker Status</h2>
-      <p>Worker monitoring foundation.</p>
+      <button onClick={refreshWorkers}>Refresh Workers</button>
     </section>
   );
 }
