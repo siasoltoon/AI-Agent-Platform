@@ -1,7 +1,11 @@
-class Planner:
-    def create_plan(self, task):
+"""Planner agent foundation."""
+
+class PlannerAgent:
+    name = "planner"
+
+    def plan(self, task):
         return {
-            "task_id": task.get("task_id"),
+            "task": task,
             "steps": [],
             "status": "planned"
         }
