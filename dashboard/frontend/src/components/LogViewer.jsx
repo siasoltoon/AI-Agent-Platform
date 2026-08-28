@@ -1,8 +1,14 @@
+import { connectWebsocket } from "../services/websocket";
+
 export default function LogViewer() {
+  function startLogs() {
+    connectWebsocket();
+  }
+
   return (
     <section>
       <h2>Live Logs</h2>
-      <p>Realtime log viewer foundation.</p>
+      <button onClick={startLogs}>Connect Logs</button>
     </section>
   );
 }
