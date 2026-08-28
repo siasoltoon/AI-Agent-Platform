@@ -1,3 +1,5 @@
+"""Agent memory foundation."""
+
 class AgentMemory:
     def __init__(self):
         self.history = []
