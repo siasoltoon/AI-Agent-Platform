@@ -8,8 +8,11 @@ export default function Dashboard() {
   return (
     <main className="dashboard-container">
       <header className="dashboard-header">
-        <h1>AI Agent Platform Dashboard</h1>
-        <p>Agent control and execution monitoring panel</p>
+        <div>
+          <h1>AI Agent Platform</h1>
+          <p>Autonomous agent control center</p>
+        </div>
+        <div className="system-status">SYSTEM ONLINE</div>
       </header>
 
       <section className="dashboard-grid">
