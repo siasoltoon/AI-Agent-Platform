@@ -4,6 +4,7 @@ AI Agent Platform Backend
 Main FastAPI application.
 """
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -12,6 +13,7 @@ from fastapi.responses import FileResponse
 
 from backend.api import agents
 from backend.api import tasks
+from backend.task_runner import DEFAULT_POLL_SECONDS, TaskRunner
 from config.production_config import CONFIG
 
 
@@ -19,10 +21,22 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DASHBOARD_DIR = BASE_DIR / "dashboard"
 
 
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    runner = TaskRunner(tasks.TASK_STORE, tasks.task_router, poll_seconds=DEFAULT_POLL_SECONDS)
+    tasks.TASK_RUNNER = runner
+    runner.start()
+    try:
+        yield
+    finally:
+        runner.stop()
+
+
 app = FastAPI(
     title="AI-Agent-Platform",
     version="0.1.0",
     description="AI Agent Platform Controller",
+    lifespan=lifespan,
 )
 
 
