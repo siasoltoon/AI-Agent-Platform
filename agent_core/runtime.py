@@ -1,17 +1,22 @@
 """
 Agent Runtime
 
-Coordinates task execution between the Agent Core,
-Task Engine and Worker layer.
+Coordinates task execution between the Agent Core, Task Engine and PC Worker.
+Large missions automatically use a multi-step planner/executor/finalizer path.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from agent_core.large_task import LargeTaskOrchestrator
 from backend.services.worker_client import WorkerClient
 from config.worker_config import (
     DEFAULT_MODEL,
+    LARGE_TASK_THRESHOLD,
+    LARGE_TASK_TIMEOUT,
+    MAX_PLAN_STEPS,
+    STEP_CONTEXT_CHARS,
     WORKER_HOST,
     WORKER_PORT,
     WORKER_TIMEOUT,
@@ -25,7 +30,32 @@ class AgentRuntime:
             port=WORKER_PORT,
         )
         self.timeout = WORKER_TIMEOUT
+        self.large_task_timeout = LARGE_TASK_TIMEOUT
         self.default_model = DEFAULT_MODEL
+        self.large_task_threshold = LARGE_TASK_THRESHOLD
+
+    def _generate(
+        self,
+        prompt: str,
+        model: str,
+        timeout: int,
+        task_id: str | None,
+        phase: str,
+    ) -> dict[str, Any]:
+        response = self.worker_client.execute_task(
+            {
+                "task_id": task_id,
+                "prompt": prompt,
+                "model": model,
+                "timeout": timeout,
+                "metadata": {"phase": phase},
+            },
+            timeout=timeout,
+        )
+        return {
+            "response": response.get("result", ""),
+            "raw": response,
+        }
 
     def execute(
         self,
@@ -34,30 +64,60 @@ class AgentRuntime:
         task_id: str | None = None,
         timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
-        """Execute an agent task through the worker."""
-
+        """Execute a task, automatically switching to large-task orchestration."""
         if not prompt or not prompt.strip():
             raise ValueError("Task prompt cannot be empty.")
 
+        prompt = prompt.strip()
         selected_model = model or self.default_model
-        selected_timeout = timeout_seconds or self.timeout
+        is_large = len(prompt) >= self.large_task_threshold
+        selected_timeout = (
+            timeout_seconds
+            or (self.large_task_timeout if is_large else self.timeout)
+        )
 
-        task = {
-            "task_id": task_id,
-            "prompt": prompt.strip(),
-            "model": selected_model,
-            "timeout": selected_timeout,
-        }
+        if not is_large:
+            result = self.worker_client.execute_task(
+                {
+                    "task_id": task_id,
+                    "prompt": prompt,
+                    "model": selected_model,
+                    "timeout": selected_timeout,
+                },
+                timeout=selected_timeout,
+            )
+            return {
+                "task_id": task_id,
+                "model": selected_model,
+                "execution_mode": "single",
+                "result": result,
+            }
 
-        result = self.worker_client.execute_task(task)
+        orchestrator = LargeTaskOrchestrator(
+            generate=lambda p, timeout: self._generate(
+                p,
+                selected_model,
+                timeout,
+                task_id,
+                "large_task",
+            ),
+            threshold=self.large_task_threshold,
+            max_steps=MAX_PLAN_STEPS,
+            context_chars=STEP_CONTEXT_CHARS,
+        )
+        orchestration = orchestrator.execute(
+            prompt=prompt,
+            model=selected_model,
+            timeout=selected_timeout,
+        )
 
         return {
             "task_id": task_id,
             "model": selected_model,
-            "result": result,
+            "execution_mode": "multi_step",
+            "result": orchestration,
         }
 
     def health_check(self) -> dict[str, Any]:
         """Check whether the worker is reachable."""
-
         return self.worker_client.health_check()
