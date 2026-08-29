@@ -73,14 +73,27 @@ class AgentExecutor:
 
     @staticmethod
     def _normalize_decision(decision: dict[str, Any]) -> dict[str, Any]:
-        """Accept the canonical contract and the common tool-action shorthand."""
+        """Normalize supported tool shorthands into the canonical action contract.
+
+        Accepted tool forms include both::
+
+            {"action": "tool", "tool": "write_file", "args": {...}}
+            {"action": "write_file", "args": {...}}
+            {"action": "write_file", "tool": "write_file", "args": {...}}
+
+        The latter two are common outputs from small local coding models.  The
+        executor must still route them through the same validated tool path.
+        """
         action = decision.get("action")
-        if action in AgentExecutor._TOOLS and "tool" not in decision:
+        tool = decision.get("tool")
+
+        if action in AgentExecutor._TOOLS:
             decision = {
                 **decision,
                 "action": "tool",
-                "tool": action,
+                "tool": str(tool or action),
             }
+
         return decision
 
     def _tool(self, name: str, args: dict[str, Any]) -> Any:
