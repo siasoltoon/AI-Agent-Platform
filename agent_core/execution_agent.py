@@ -17,7 +17,7 @@ class AgentExecutionError(RuntimeError):
 
 
 class AgentExecutor:
-    """Execute coding tasks through a bounded plan/act/observe loop."""
+    """Execute coding tasks through a bounded plan/act/observe/verify loop."""
 
     _TOOLS = {"read_file", "write_file", "terminal"}
 
@@ -48,12 +48,7 @@ class AgentExecutor:
     def _extract_json(text: str) -> dict[str, Any]:
         text = text.strip()
         candidates = [text]
-        fenced = re.findall(
-            r"```(?:json)?\s*(\{.*?\})\s*```",
-            text,
-            re.DOTALL | re.IGNORECASE,
-        )
-        candidates.extend(fenced)
+        candidates.extend(re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL | re.IGNORECASE))
         for candidate in candidates:
             try:
                 value = json.loads(candidate)
@@ -73,17 +68,10 @@ class AgentExecutor:
 
     @staticmethod
     def _normalize_decision(decision: dict[str, Any]) -> dict[str, Any]:
-        """Normalize supported tool shorthands into the canonical action contract."""
         action = decision.get("action")
         tool = decision.get("tool")
-
         if action in AgentExecutor._TOOLS:
-            decision = {
-                **decision,
-                "action": "tool",
-                "tool": str(tool or action),
-            }
-
+            decision = {**decision, "action": "tool", "tool": str(tool or action)}
         return decision
 
     def _tool(self, name: str, args: dict[str, Any]) -> Any:
@@ -93,7 +81,8 @@ class AgentExecutor:
         if name == "write_file":
             path = self._safe_path(str(args.get("path", "")))
             path.parent.mkdir(parents=True, exist_ok=True)
-            return self.write_file.execute(str(path), str(args.get("content", "")))
+            self.write_file.execute(str(path), str(args.get("content", "")))
+            return {"ok": True, "path": str(path.relative_to(self.workspace)), "bytes": path.stat().st_size}
         if name == "terminal":
             command = str(args.get("command", "")).strip()
             if not command:
@@ -104,6 +93,31 @@ class AgentExecutor:
             result = self.terminal.execute(command, timeout=timeout)
             return {**result, "command": command}
         raise AgentExecutionError(f"Unknown tool: {name}")
+
+    def _verify_evidence(self, task: str, tool_records: list[dict[str, Any]]) -> dict[str, Any]:
+        """Verify completion from observable execution evidence, never from the model's claim alone."""
+        successful = [r for r in tool_records if r.get("ok")]
+        writes = [r for r in successful if r.get("tool") == "write_file"]
+        terminals = [r for r in successful if r.get("tool") == "terminal" and r.get("result", {}).get("code") == 0]
+
+        checks: list[dict[str, Any]] = []
+        for record in writes:
+            rel = record.get("result", {}).get("path")
+            if rel:
+                target = self._safe_path(rel)
+                checks.append({"type": "file_exists", "path": rel, "passed": target.is_file()})
+        for record in terminals:
+            checks.append({"type": "terminal_success", "command": record.get("result", {}).get("command"), "passed": True})
+
+        task_lower = task.lower()
+        if any(word in task_lower for word in ("create", "write", "make", "generate", "save", "build")):
+            passed = bool(writes) and all(c["passed"] for c in checks if c["type"] == "file_exists")
+        elif any(word in task_lower for word in ("test", "pytest", "compile", "run")):
+            passed = bool(terminals)
+        else:
+            passed = bool(successful)
+
+        return {"verified": passed, "checks": checks, "successful_tool_actions": len(successful)}
 
     def execute(self, task: str) -> dict[str, Any]:
         if not task or not task.strip():
@@ -123,27 +137,38 @@ Rules:
 - After changes, run appropriate validation/tests and fix failures.
 - Never claim completion unless the requested work was actually performed.
 - You MUST execute at least one tool action before returning done.
+- A done response is only accepted when observable execution evidence verifies the requested work.
+- If a tool fails, inspect the observation, recover, and continue when possible.
 - Keep actions small and observable.
 """
-        conversation = f"{system}\n\nTASK:\n{task}\n\nWORKSPACE:\n{self.workspace}"
+        conversation = f"{system}\n\nTASK:\n{task.strip()}\n\nWORKSPACE:\n{self.workspace}"
         actions: list[dict[str, Any]] = []
-        tool_actions = 0
+        tool_records: list[dict[str, Any]] = []
 
         for step in range(1, self.max_steps + 1):
             response = self.ollama.generate(conversation, timeout=self.ollama.timeout)
-            text = response.get("response", "")
-            decision = self._normalize_decision(self._extract_json(text))
+            decision = self._normalize_decision(self._extract_json(response.get("response", "")))
             action = decision.get("action")
             actions.append({"step": step, "decision": decision})
 
             if action == "done":
-                if tool_actions == 0:
+                evidence = self._verify_evidence(task, tool_records)
+                if not tool_records:
                     raise AgentExecutionError("Agent claimed completion without executing a tool action.")
+                if not evidence["verified"]:
+                    conversation += (
+                        "\n\nVERIFICATION FAILED: the completion claim is not supported by observable evidence. "
+                        "Perform another tool action to finish and verify the task."
+                    )
+                    actions[-1]["verification"] = evidence
+                    continue
                 return {
                     "status": "completed",
                     "execution_mode": "agentic",
                     "summary": str(decision.get("summary", "Task completed.")),
                     "steps": actions,
+                    "execution_evidence": evidence,
+                    "tool_records": tool_records,
                 }
 
             if action != "tool":
@@ -156,14 +181,20 @@ Rules:
             if not isinstance(args, dict):
                 raise AgentExecutionError("Tool args must be an object.")
 
-            result = self._tool(tool, args)
-            tool_actions += 1
+            try:
+                result = self._tool(tool, args)
+                record = {"step": step, "tool": tool, "ok": True, "result": result}
+            except Exception as exc:
+                record = {"step": step, "tool": tool, "ok": False, "error_type": type(exc).__name__, "error": str(exc)}
+                result = {"ok": False, "error_type": type(exc).__name__, "error": str(exc)}
+
+            tool_records.append(record)
             serialized = json.dumps(result, ensure_ascii=False, default=str)
             if len(serialized) > self.max_output_chars:
                 serialized = serialized[: self.max_output_chars] + "...<truncated>"
             conversation += (
                 f"\n\nOBSERVATION step {step}: tool={tool}\n"
-                f"{serialized}\n\nContinue with the next action or return done."
+                f"{serialized}\n\nContinue with the next action or return done only after verification."
             )
 
         raise AgentExecutionError(f"Agent exceeded maximum execution steps ({self.max_steps}).")
