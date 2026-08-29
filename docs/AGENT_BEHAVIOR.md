@@ -1,11 +1,13 @@
-# Agent Behavior
+# Agent execution behavior
 
-The agent must:
+The default `agent.execute` command is now agentic: the model decides the next action, the worker executes that action in the configured workspace, observes the result, and continues until completion or a bounded failure.
 
-1. Inspect current state.
-2. Plan before execution.
-3. Use available tools safely.
-4. Validate changes.
-5. Report progress and failures.
+The agent can currently:
 
-The agent should prefer safe incremental changes over destructive rewrites.
+- inspect files with `read_file`
+- create/update files with `write_file`
+- run project validation commands with `terminal`
+
+The loop is bounded by `max_agent_steps` (default 12), validates JSON actions, rejects unknown tools, and prevents file paths from escaping the configured workspace.
+
+A task is not considered completed merely because the model generated code. Completion requires the worker to execute the requested actions and return a completed execution record.

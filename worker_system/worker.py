@@ -9,9 +9,9 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from agent_core.execution_agent import AgentExecutionError, AgentExecutor
 from backend.services.ollama_service import OllamaService
 from config.worker_config import DEFAULT_MODEL, OLLAMA_HOST, WORKER_TIMEOUT
-
 
 logger = logging.getLogger("ai_agent_worker")
 
@@ -39,36 +39,35 @@ class Worker:
 
             model = job.get("model") or DEFAULT_MODEL
             timeout = int(job.get("timeout") or WORKER_TIMEOUT)
+            metadata = job.get("metadata") or {}
+            workspace = metadata.get("workspace")
 
             logger.info(
-                "Executing task_id=%s model=%s prompt_length=%s timeout=%s",
-                job.get("task_id"),
-                model,
-                len(prompt),
-                timeout,
+                "Executing task_id=%s model=%s prompt_length=%s timeout=%s mode=agentic",
+                job.get("task_id"), model, len(prompt), timeout,
             )
 
-            service = OllamaService(
-                base_url=OLLAMA_HOST,
-                model=model,
-                timeout=timeout,
+            service = OllamaService(base_url=OLLAMA_HOST, model=model, timeout=timeout)
+            executor = AgentExecutor(
+                service,
+                workspace_root=workspace,
+                max_steps=int(metadata.get("max_agent_steps", 12)),
             )
-            response = service.generate(prompt, timeout=timeout)
+            result = executor.execute(str(prompt))
 
             return {
                 "status": "completed",
                 "worker_id": self.worker_id,
                 "task_id": job.get("task_id"),
                 "model": model,
-                "result": response.get("response", ""),
-                "raw": response,
+                "result": result,
             }
         finally:
             self.status = "idle"
 
 
 worker = Worker("pc-worker-01")
-app = FastAPI(title="AI Agent Platform Worker", version="0.2.0")
+app = FastAPI(title="AI Agent Platform Worker", version="0.3.0")
 
 
 @app.get("/health")
@@ -79,6 +78,7 @@ def health() -> dict[str, Any]:
         "worker_status": worker.status,
         "ollama": OLLAMA_HOST,
         "model": DEFAULT_MODEL,
+        "execution_mode": "agentic",
     }
 
 
@@ -86,24 +86,16 @@ def health() -> dict[str, Any]:
 def execute(request: ExecuteRequest) -> dict[str, Any]:
     try:
         return worker.execute(request.model_dump())
+    except (AgentExecutionError, ValueError) as exc:
+        logger.error("Agent execution failed: %s: %s", type(exc).__name__, exc)
+        raise HTTPException(
+            status_code=422,
+            detail={"message": "Agent could not complete the task.", "error": str(exc), "task_id": request.task_id},
+        ) from exc
     except Exception as exc:
         worker.status = "idle"
-        error_type = type(exc).__name__
-        error_message = str(exc)
-        trace = traceback.format_exc()
-        logger.error(
-            "Worker execution failed: %s: %s\n%s",
-            error_type,
-            error_message,
-            trace,
-        )
+        logger.error("Worker execution failed: %s\n%s", exc, traceback.format_exc())
         raise HTTPException(
             status_code=500,
-            detail={
-                "message": "Worker execution failed.",
-                "error_type": error_type,
-                "error": error_message,
-                "task_id": request.task_id,
-                "model": request.model or DEFAULT_MODEL,
-            },
+            detail={"message": "Worker execution failed.", "error_type": type(exc).__name__, "error": str(exc), "task_id": request.task_id},
         ) from exc

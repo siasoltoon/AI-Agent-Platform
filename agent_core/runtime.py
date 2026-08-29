@@ -28,31 +28,15 @@ from config.worker_config import (
 
 class AgentRuntime:
     def __init__(self, worker_client: WorkerClient | None = None):
-        self.worker_client = worker_client or WorkerClient(
-            host=WORKER_HOST,
-            port=WORKER_PORT,
-        )
+        self.worker_client = worker_client or WorkerClient(host=WORKER_HOST, port=WORKER_PORT)
         self.timeout = WORKER_TIMEOUT
         self.large_task_timeout = LARGE_TASK_TIMEOUT
         self.default_model = DEFAULT_MODEL
         self.large_task_threshold = LARGE_TASK_THRESHOLD
 
-    def _generate(
-        self,
-        prompt: str,
-        model: str,
-        timeout: int,
-        task_id: str | None,
-        phase: str,
-    ) -> dict[str, Any]:
+    def _generate(self, prompt: str, model: str, timeout: int, task_id: str | None, phase: str, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
         response = self.worker_client.execute_task(
-            {
-                "task_id": task_id,
-                "prompt": prompt,
-                "model": model,
-                "timeout": timeout,
-                "metadata": {"phase": phase},
-            },
+            {"task_id": task_id, "prompt": prompt, "model": model, "timeout": timeout, "metadata": {"phase": phase, **(metadata or {})}},
             timeout=timeout,
         )
         return {"response": response.get("result", ""), "raw": response}
@@ -63,43 +47,27 @@ class AgentRuntime:
         model: str | None = None,
         task_id: str | None = None,
         timeout_seconds: int | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Execute a task, automatically switching to large-task orchestration."""
+        """Execute a task through the real agentic PC-worker path."""
         if not prompt or not prompt.strip():
             raise ValueError("Task prompt cannot be empty.")
 
         prompt = prompt.strip()
         selected_model = model or self.default_model
         is_large = len(prompt) >= self.large_task_threshold
-        selected_timeout = timeout_seconds or (
-            self.large_task_timeout if is_large else self.timeout
-        )
+        selected_timeout = timeout_seconds or (self.large_task_timeout if is_large else self.timeout)
+        execution_metadata = dict(metadata or {})
 
         if not is_large:
             result = self.worker_client.execute_task(
-                {
-                    "task_id": task_id,
-                    "prompt": prompt,
-                    "model": selected_model,
-                    "timeout": selected_timeout,
-                },
+                {"task_id": task_id, "prompt": prompt, "model": selected_model, "timeout": selected_timeout, "metadata": execution_metadata},
                 timeout=selected_timeout,
             )
-            return {
-                "task_id": task_id,
-                "model": selected_model,
-                "execution_mode": "single",
-                "result": result,
-            }
+            return {"task_id": task_id, "model": selected_model, "execution_mode": "agentic", "result": result}
 
         orchestrator = LargeTaskOrchestrator(
-            generate=lambda p, timeout: self._generate(
-                p,
-                selected_model,
-                timeout,
-                task_id,
-                "large_task",
-            ),
+            generate=lambda p, timeout: self._generate(p, selected_model, timeout, task_id, "large_task", execution_metadata),
             threshold=self.large_task_threshold,
             max_steps=MAX_PLAN_STEPS,
             max_retries=MAX_STEP_RETRIES,
@@ -107,19 +75,8 @@ class AgentRuntime:
             mission_context_chars=MISSION_CONTEXT_CHARS,
             mission_chunk_chars=MISSION_CHUNK_CHARS,
         )
-        orchestration = orchestrator.execute(
-            prompt=prompt,
-            model=selected_model,
-            timeout=selected_timeout,
-        )
-
-        return {
-            "task_id": task_id,
-            "model": selected_model,
-            "execution_mode": "multi_step",
-            "result": orchestration,
-        }
+        orchestration = orchestrator.execute(prompt=prompt, model=selected_model, timeout=selected_timeout)
+        return {"task_id": task_id, "model": selected_model, "execution_mode": "multi_step_agentic", "result": orchestration}
 
     def health_check(self) -> dict[str, Any]:
-        """Check whether the worker is reachable."""
         return self.worker_client.health_check()
