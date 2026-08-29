@@ -10,12 +10,13 @@ from task_engine.contracts import TaskRequest, TaskStatus
 
 
 class TaskRunner:
-    """Run persisted tasks outside the HTTP request lifecycle with cancellation safety."""
+    """Run persisted tasks outside HTTP with bounded retries and cancellation safety."""
 
-    def __init__(self, store, router, *, poll_seconds: float = 0.25) -> None:
+    def __init__(self, store, router, *, poll_seconds: float = 0.25, default_retries: int = 2) -> None:
         self.store = store
         self.router = router
         self.poll_seconds = max(0.05, float(poll_seconds))
+        self.default_retries = max(0, min(int(default_retries), 5))
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._lifecycle_lock = threading.Lock()
@@ -38,7 +39,7 @@ class TaskRunner:
             self._stop.set()
             thread = self._thread
         if thread and thread.is_alive():
-            thread.join(timeout=2.0)
+            thread.join(timeout=5.0)
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -47,6 +48,39 @@ class TaskRunner:
                 self._stop.wait(self.poll_seconds)
                 continue
             self._execute(task)
+
+    @staticmethod
+    def _retry_budget(metadata: dict) -> int:
+        try:
+            value = int(metadata.get("max_retries", 2))
+        except (TypeError, ValueError):
+            value = 2
+        return max(0, min(value, 5))
+
+    @staticmethod
+    def _retry_count(metadata: dict) -> int:
+        try:
+            return max(0, int(metadata.get("retry_count", 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    def _fail_or_retry(self, task_id: str, record: dict, error: str) -> None:
+        if self.store.is_cancelled(task_id):
+            return
+        metadata = dict(record.get("metadata", {}))
+        retries = self._retry_count(metadata)
+        budget = self._retry_budget(metadata)
+        if retries < budget:
+            metadata.update({"retry_count": retries + 1, "last_error": error, "retry_at": time.time()})
+            self.store.requeue_for_retry(task_id, metadata=metadata, error=error)
+            return
+        self.store.update(
+            task_id,
+            status=TaskStatus.FAILED.value,
+            completed_at=time.time(),
+            error=error,
+            metadata={**metadata, "retry_count": retries, "max_retries": budget},
+        )
 
     def _execute(self, record: dict) -> None:
         task_id = record["id"]
@@ -61,15 +95,18 @@ class TaskRunner:
             timeout_seconds=metadata.get("timeout_seconds"),
             metadata=metadata,
         )
+        started = time.time()
         try:
             result = self.router.route(task, task_id=task_id)
-            # Cancellation is authoritative. A worker may finish after a cancel request;
-            # never turn that cancelled task back into completed.
             if self.store.is_cancelled(task_id):
                 return
 
             current = self.store.get(task_id) or record
-            execution_metadata = {"execution_mode": result.get("execution_mode", "agentic")}
+            execution_metadata = {
+                "execution_mode": result.get("execution_mode", "agentic"),
+                "duration_seconds": round(time.time() - started, 3),
+                "retry_count": self._retry_count(current.get("metadata", {})),
+            }
             nested = result.get("result")
             if isinstance(nested, dict):
                 execution_metadata.update({
@@ -84,11 +121,10 @@ class TaskRunner:
                 metadata={**current.get("metadata", {}), **execution_metadata},
             )
         except TimeoutError as exc:
-            if not self.store.is_cancelled(task_id):
-                self.store.update(task_id, status=TaskStatus.FAILED.value, completed_at=time.time(), error=str(exc) or "Task execution timed out.")
+            self._fail_or_retry(task_id, record, str(exc) or "Task execution timed out.")
         except Exception as exc:
-            if not self.store.is_cancelled(task_id):
-                self.store.update(task_id, status=TaskStatus.FAILED.value, completed_at=time.time(), error=str(exc) or "Task execution failed.")
+            self._fail_or_retry(task_id, record, str(exc) or "Task execution failed.")
 
 
 DEFAULT_POLL_SECONDS = float(os.getenv("TASK_RUNNER_POLL_SECONDS", "0.25"))
+DEFAULT_TASK_RETRIES = max(0, min(int(os.getenv("TASK_RUNNER_MAX_RETRIES", "2")), 5))
