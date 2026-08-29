@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 import uuid
 
@@ -17,7 +18,7 @@ router = APIRouter(prefix="/tasks", tags=["Tasks"])
 runtime = AgentRuntime()
 command_registry = CommandRegistry()
 task_router = TaskRouter(command_registry)
-TASK_STORE = TaskStore()
+TASK_STORE = TaskStore(os.getenv("TASK_DB_PATH", "data/tasks.db"))
 
 
 def _execute_agent_task(task: TaskRequest, *, task_id: str) -> dict:
@@ -68,13 +69,13 @@ async def create_task(task: TaskRequest) -> TaskResponse:
     }
     try:
         TASK_STORE.create(record)
+        TASK_STORE.update(task_id, status=TaskStatus.RUNNING.value, started_at=time.time())
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Task persistence is unavailable.") from exc
 
-    TASK_STORE.update(task_id, status=TaskStatus.RUNNING.value, started_at=time.time())
-
     try:
         result = task_router.route(task, task_id=task_id)
+        current = TASK_STORE.get(task_id)
         metadata = {"execution_mode": result.get("execution_mode", "agentic")}
         nested = result.get("result")
         if isinstance(nested, dict):
@@ -89,7 +90,7 @@ async def create_task(task: TaskRequest) -> TaskResponse:
             status=TaskStatus.COMPLETED.value,
             completed_at=time.time(),
             result=result,
-            metadata={**TASK_STORE.get(task_id)["metadata"], **metadata},
+            metadata={**(current or {}).get("metadata", {}), **metadata},
         )
         return TaskResponse(**task_record)
     except TimeoutError as exc:
