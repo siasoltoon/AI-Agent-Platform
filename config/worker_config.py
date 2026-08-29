@@ -34,7 +34,7 @@ WORKER_TIMEOUT = int(
 # Ollama model
 DEFAULT_MODEL = os.getenv(
     "DEFAULT_MODEL",
-    "qwen2.5-coder"
+    "qwen2.5-coder:7b"
 )
 
 
