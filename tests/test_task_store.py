@@ -1,24 +1,29 @@
+import pytest
+
 from task_engine.contracts import TaskStatus
 from backend.storage.task_store import TaskStore
+
+
+def _seed(store, task_id="task-1", status=TaskStatus.QUEUED.value):
+    store.create({
+        "id": task_id,
+        "prompt": "Create hello.txt",
+        "model": None,
+        "status": status,
+        "created_at": 1.0,
+        "started_at": None,
+        "completed_at": None,
+        "result": None,
+        "error": None,
+        "metadata": {"command": "agent.execute"},
+    })
 
 
 def test_task_store_persists_and_reloads(tmp_path):
     path = tmp_path / "tasks.db"
     store = TaskStore(path)
-    store.create(
-        {
-            "id": "task-1",
-            "prompt": "Create a file",
-            "model": "test-model",
-            "status": TaskStatus.QUEUED.value,
-            "created_at": 1.0,
-            "started_at": None,
-            "completed_at": None,
-            "result": None,
-            "error": None,
-            "metadata": {"command": "agent.execute"},
-        }
-    )
+    _seed(store)
+    store.update("task-1", status=TaskStatus.RUNNING.value, started_at=2.0)
     store.update("task-1", status=TaskStatus.COMPLETED.value, result={"ok": True})
 
     reloaded = TaskStore(path)
@@ -26,24 +31,41 @@ def test_task_store_persists_and_reloads(tmp_path):
     assert task is not None
     assert task["status"] == TaskStatus.COMPLETED.value
     assert task["result"] == {"ok": True}
-    assert task["metadata"]["command"] == "agent.execute"
+    assert [event["event_type"] for event in reloaded.events("task-1")] == ["created", "status_changed", "status_changed"]
 
 
-def test_task_store_lists_newest_first(tmp_path):
+def test_task_store_lists_newest_first_and_filters(tmp_path):
     store = TaskStore(tmp_path / "tasks.db")
-    for task_id, created_at in (("old", 1.0), ("new", 2.0)):
-        store.create(
-            {
-                "id": task_id,
-                "prompt": task_id,
-                "model": None,
-                "status": TaskStatus.QUEUED.value,
-                "created_at": created_at,
-                "started_at": None,
-                "completed_at": None,
-                "result": None,
-                "error": None,
-                "metadata": {},
-            }
-        )
+    _seed(store, "old")
+    _seed(store, "new")
+    store.update("new", status=TaskStatus.RUNNING.value)
     assert [task["id"] for task in store.list()] == ["new", "old"]
+    assert [task["id"] for task in store.list(status="running")] == ["new"]
+
+
+def test_task_store_cancel_is_terminal_and_idempotent(tmp_path):
+    store = TaskStore(tmp_path / "tasks.db")
+    _seed(store)
+    cancelled = store.cancel("task-1", reason="user requested stop")
+    assert cancelled["status"] == TaskStatus.CANCELLED.value
+    assert cancelled["error"] == "user requested stop"
+    again = store.cancel("task-1")
+    assert again["status"] == TaskStatus.CANCELLED.value
+    assert len(store.events("task-1")) == 2
+
+
+def test_task_store_rejects_invalid_lifecycle_update(tmp_path):
+    store = TaskStore(tmp_path / "tasks.db")
+    _seed(store)
+    store.update("task-1", status=TaskStatus.RUNNING.value)
+    with pytest.raises(ValueError, match="Invalid task lifecycle transition"):
+        store.update("task-1", status=TaskStatus.QUEUED.value)
+
+
+def test_task_store_recovery_is_audited(tmp_path):
+    store = TaskStore(tmp_path / "tasks.db")
+    _seed(store)
+    store.update("task-1", status=TaskStatus.RUNNING.value)
+    assert store.recover_running_tasks() == 1
+    assert store.get("task-1")["status"] == TaskStatus.QUEUED.value
+    assert store.events("task-1")[-1]["event_type"] == "recovered"
