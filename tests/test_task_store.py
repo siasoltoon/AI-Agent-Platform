@@ -1,3 +1,5 @@
+import shutil
+
 import pytest
 
 from task_engine.contracts import TaskStatus
@@ -69,3 +71,18 @@ def test_task_store_recovery_is_audited(tmp_path):
     assert store.recover_running_tasks() == 1
     assert store.get("task-1")["status"] == TaskStatus.QUEUED.value
     assert store.events("task-1")[-1]["event_type"] == "recovered"
+
+
+def test_task_store_releases_sqlite_file_handle(tmp_path):
+    path = tmp_path / "tasks.db"
+    store = TaskStore(path)
+    _seed(store)
+    store.get("task-1")
+    store.list()
+    store.events("task-1")
+    store.update("task-1", status=TaskStatus.RUNNING.value)
+    store.cancel("task-1")
+    store.ping()
+
+    shutil.rmtree(tmp_path)
+    assert not path.exists()
