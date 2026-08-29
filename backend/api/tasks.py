@@ -11,12 +11,7 @@ from agent_core.runtime import AgentRuntime
 from task_engine.contracts import TaskRequest, TaskResponse, TaskStatus
 
 
-router = APIRouter(
-    prefix="/tasks",
-    tags=["Tasks"],
-)
-
-
+router = APIRouter(prefix="/tasks", tags=["Tasks"])
 runtime = AgentRuntime()
 TASK_STORE: dict[str, dict] = {}
 
@@ -24,7 +19,6 @@ TASK_STORE: dict[str, dict] = {}
 @router.post("/create", response_model=TaskResponse)
 async def create_task(task: TaskRequest) -> TaskResponse:
     """Create and execute a task through the Agent Runtime."""
-
     task_id = task.task_id or str(uuid.uuid4())
     now = time.time()
 
@@ -58,6 +52,13 @@ async def create_task(task: TaskRequest) -> TaskResponse:
         TASK_STORE[task_id]["status"] = TaskStatus.COMPLETED
         TASK_STORE[task_id]["completed_at"] = time.time()
         TASK_STORE[task_id]["result"] = result
+        TASK_STORE[task_id]["metadata"].update({
+            "execution_mode": result.get("execution_mode", "single"),
+        })
+
+        nested = result.get("result")
+        if isinstance(nested, dict):
+            TASK_STORE[task_id]["metadata"]["steps"] = nested.get("steps", 1)
 
         return TaskResponse(**TASK_STORE[task_id])
 
@@ -65,7 +66,6 @@ async def create_task(task: TaskRequest) -> TaskResponse:
         TASK_STORE[task_id]["status"] = TaskStatus.FAILED
         TASK_STORE[task_id]["completed_at"] = time.time()
         TASK_STORE[task_id]["error"] = str(exc)
-
         raise HTTPException(
             status_code=502,
             detail={
@@ -78,17 +78,12 @@ async def create_task(task: TaskRequest) -> TaskResponse:
 
 @router.get("/{task_id}", response_model=TaskResponse)
 async def get_task(task_id: str) -> TaskResponse:
-    """Return a task by ID."""
-
     task = TASK_STORE.get(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found.")
-
     return TaskResponse(**task)
 
 
 @router.get("", response_model=dict)
 async def list_tasks() -> dict:
-    """Return all tasks."""
-
     return {"tasks": list(TASK_STORE.values())}
