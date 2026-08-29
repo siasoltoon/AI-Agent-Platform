@@ -27,7 +27,7 @@ class TerminalTool(BaseTool):
     }
     _BLOCKED = re.compile(
         r"(?:\b(?:del|erase|format|shutdown|restart|taskkill|diskpart|reg|powershell|pwsh|cmd)\b|"
-        r"(?:>|>>|\|\||&&)|(?:\b(?:rm|sudo|chmod|chown)\b))",
+        r"[;&|><`]|(?:\b(?:rm|sudo|chmod|chown)\b))",
         re.IGNORECASE,
     )
 
