@@ -12,7 +12,7 @@ The agent can currently:
 
 - The model must return a structured JSON action for every turn.
 - Supported actions are `read_file`, `write_file`, `terminal`, and `done`.
-- Tool shorthands such as `{ "action": "write_file", "args": {...} }` are normalized to the canonical tool contract.
+- Tool shorthands are normalized to the canonical tool contract.
 - `done` is rejected until at least one real tool action has executed and observable evidence supports completion.
 - File paths are resolved inside the configured workspace and workspace escapes are rejected.
 - Terminal execution is bounded to a maximum 600-second command timeout.
@@ -24,10 +24,12 @@ The agent can currently:
 - Caller-supplied task IDs are normalized and bounded to 128 characters.
 - Task metadata is bounded to 64 keys and 32,768 serialized characters.
 - Tool observations are returned to the model so it can inspect results, detect failures, and continue fixing the task.
-- Completion records include the executed decision history, tool records, and verification evidence rather than only model-generated text.
+- Completion records include executed decision history, tool records, and verification evidence rather than only model-generated text.
 - The worker refuses to report successful execution unless the agent result contains verified execution evidence.
 - Failed execution is recorded as a failed task with an explicit error before the API reports the failure.
 - Unknown task commands are rejected before execution through the command registry/router.
+- Task lifecycle records are durably persisted in SQLite and survive backend restarts.
+- `/health/live` provides a process liveness probe; `/health/ready` verifies task-store readiness.
 
 ## Production completion rule
 
