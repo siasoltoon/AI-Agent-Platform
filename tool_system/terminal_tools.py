@@ -37,14 +37,18 @@ class TerminalTool(BaseTool):
             raise ValueError("Terminal command cannot be empty.")
         if timeout < 1 or timeout > 600:
             raise ValueError("Terminal timeout must be between 1 and 600 seconds.")
-        if self._BLOCKED.search(command):
-            raise PermissionError("Terminal command contains a blocked operation.")
 
+        # Report an unsupported executable as an allow-list violation. This is
+        # intentionally checked before blocked-operation scanning so callers can
+        # distinguish "unsupported command" from "unsafe syntax".
         executable = command.split()[0].strip('"\'').lower()
         if executable.endswith(".exe"):
             executable = executable[:-4]
         if executable not in self._ALLOWED:
             raise PermissionError(f"Terminal command is not allowed: {executable}")
+
+        if self._BLOCKED.search(command):
+            raise PermissionError("Terminal command contains a blocked operation.")
 
         result = subprocess.run(
             command,
