@@ -64,6 +64,25 @@ class AgentRuntime:
             raise ValueError(f"{field} must be between 1 and {MAX_RUNTIME_TIMEOUT} seconds.")
         return value
 
+    @staticmethod
+    def _validate_worker_result(response: dict[str, Any]) -> None:
+        """Reject false-positive worker responses before a task can be marked completed."""
+        if not isinstance(response, dict):
+            raise RuntimeError("Worker returned an invalid execution response.")
+        if response.get("status") != "completed":
+            raise RuntimeError("Worker did not report a completed execution.")
+        result = response.get("result")
+        if not isinstance(result, dict):
+            raise RuntimeError("Worker returned no structured execution result.")
+        evidence = result.get("execution_evidence")
+        if not isinstance(evidence, dict) or evidence.get("verified") is not True:
+            raise RuntimeError("Worker reported completion without verified execution evidence.")
+        tool_records = result.get("tool_records")
+        if not isinstance(tool_records, list) or not any(
+            isinstance(record, dict) and record.get("ok") is True for record in tool_records
+        ):
+            raise RuntimeError("Worker reported completion without a successful tool action.")
+
     def execute(
         self,
         prompt: str,
@@ -96,6 +115,7 @@ class AgentRuntime:
                 },
                 timeout=selected_timeout,
             )
+            self._validate_worker_result(result)
             return {
                 "task_id": task_id,
                 "model": selected_model,
