@@ -4,15 +4,27 @@ from agent_core.runtime import AgentRuntime, MAX_RUNTIME_TIMEOUT
 
 
 class FakeWorker:
-    def __init__(self):
+    def __init__(self, response=None):
         self.calls = []
+        self.response = response or {"result": "ok"}
 
     def execute_task(self, payload, timeout):
         self.calls.append((payload, timeout))
-        return {"result": "ok"}
+        return self.response
 
     def health_check(self):
         return {"ok": True}
+
+
+def verified_worker_response():
+    return {
+        "status": "completed",
+        "result": {
+            "status": "completed",
+            "execution_evidence": {"verified": True},
+            "tool_records": [{"tool": "write_file", "ok": True}],
+        },
+    }
 
 
 def test_runtime_rejects_timeout_above_hard_limit():
@@ -26,10 +38,21 @@ def test_runtime_rejects_timeout_above_hard_limit():
 
 
 def test_runtime_uses_bounded_timeout_for_normal_task():
-    worker = FakeWorker()
+    worker = FakeWorker(verified_worker_response())
     runtime = AgentRuntime(worker_client=worker)
 
     result = runtime.execute("hello", timeout_seconds=30)
 
     assert result["execution_mode"] == "agentic"
     assert worker.calls[0][1] == 30
+
+
+def test_runtime_rejects_worker_claim_without_execution_evidence():
+    worker = FakeWorker({
+        "status": "completed",
+        "result": "متاسفانه، من قادر به انجام این کار بر روی سیستم خودم نیستم.",
+    })
+    runtime = AgentRuntime(worker_client=worker)
+
+    with pytest.raises(RuntimeError, match="verified execution evidence"):
+        runtime.execute("Create hello.txt", timeout_seconds=30)
