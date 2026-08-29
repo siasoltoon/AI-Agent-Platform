@@ -74,7 +74,8 @@ class TaskStore:
             "detail": json.loads(row["detail_json"]) if row["detail_json"] else None,
         }
 
-    def _record_event(self, connection: sqlite3.Connection, task_id: str, event_type: str, *, status: str | None = None, detail: Any = None) -> None:
+    @staticmethod
+    def _record_event(connection: sqlite3.Connection, task_id: str, event_type: str, *, status: str | None = None, detail: Any = None) -> None:
         connection.execute(
             "INSERT INTO task_events (task_id, created_at, event_type, status, detail_json) VALUES (?, ?, ?, ?, ?)",
             (task_id, time.time(), event_type, status, json.dumps(detail, ensure_ascii=False, default=str) if detail is not None else None),
@@ -98,10 +99,28 @@ class TaskStore:
     def list(self, *, limit: int = 100, status: str | None = None) -> list[dict[str, Any]]:
         limit = max(1, min(int(limit), 500))
         with self._lock, self._connect() as connection:
+            # Sort by most recent persisted activity rather than only created_at.
+            # This keeps recently updated tasks at the top even when creation
+            # timestamps are identical (common in deterministic/unit tests).
+            base = """
+                SELECT tasks.*
+                FROM tasks
+                LEFT JOIN (
+                    SELECT task_id, MAX(id) AS last_event_id
+                    FROM task_events
+                    GROUP BY task_id
+                ) events ON events.task_id = tasks.id
+            """
             if status:
-                rows = connection.execute("SELECT * FROM tasks WHERE status = ? ORDER BY created_at DESC LIMIT ?", (str(status).strip().lower(), limit)).fetchall()
+                rows = connection.execute(
+                    base + " WHERE tasks.status = ? ORDER BY COALESCE(events.last_event_id, 0) DESC, tasks.created_at DESC LIMIT ?",
+                    (str(status).strip().lower(), limit),
+                ).fetchall()
             else:
-                rows = connection.execute("SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+                rows = connection.execute(
+                    base + " ORDER BY COALESCE(events.last_event_id, 0) DESC, tasks.created_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
             return [self._decode(row) for row in rows]
 
     def events(self, task_id: str, *, limit: int = 200) -> list[dict[str, Any]]:

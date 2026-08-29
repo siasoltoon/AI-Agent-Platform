@@ -9,7 +9,9 @@ TERMINAL_STATUSES = frozenset({TaskStatus.COMPLETED.value, TaskStatus.FAILED.val
 
 ALLOWED_TRANSITIONS = {
     TaskStatus.QUEUED.value: frozenset({TaskStatus.RUNNING.value, TaskStatus.CANCELLED.value}),
-    TaskStatus.RUNNING.value: frozenset({TaskStatus.QUEUED.value, TaskStatus.COMPLETED.value, TaskStatus.FAILED.value, TaskStatus.CANCELLED.value}),
+    # Re-queueing is a recovery-only operation handled explicitly by TaskStore.recover_running_tasks.
+    # It is intentionally not a normal lifecycle transition exposed through update().
+    TaskStatus.RUNNING.value: frozenset({TaskStatus.COMPLETED.value, TaskStatus.FAILED.value, TaskStatus.CANCELLED.value}),
     TaskStatus.COMPLETED.value: frozenset(),
     TaskStatus.FAILED.value: frozenset(),
     TaskStatus.CANCELLED.value: frozenset(),
