@@ -1,3 +1,4 @@
+import React from "react";
 import { getAgents } from "../api/agents";
 
 export default function AgentStatus() {
