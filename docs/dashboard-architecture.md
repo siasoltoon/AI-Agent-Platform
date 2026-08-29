@@ -16,6 +16,8 @@ HTTP API client
 FastAPI Controller
   |       |       |
 Tasks   Agents  Workers
+  |       \       /
+  +---- Dashboard API
   |
 Task Store / Task Runner
   |
@@ -29,12 +31,17 @@ The browser never executes filesystem or terminal operations directly and never 
 - `GET /health/live` — process liveness.
 - `GET /health/ready` — Task Store readiness.
 - `GET /agents/status` — Agent Runtime / worker connectivity status.
-- `GET /workers/` — worker registry surface (currently empty until the backend registry publishes workers).
+- `GET /workers/` — worker registry surface.
 - `GET /tasks?limit=&status=` — durable task listing.
 - `GET /tasks/{task_id}` — authoritative task detail.
 - `GET /tasks/{task_id}/events` — execution events.
 - `POST /tasks/` — queue a task using the canonical Task Contract.
 - `POST /tasks/{task_id}/cancel` — request cancellation where lifecycle rules allow it.
+- `POST /tasks/{task_id}/retry` — explicitly requeue a failed task.
+- `GET /dashboard/summary` — one bounded read-only control-plane snapshot containing task aggregates, event totals, agent status and worker state.
+- `GET /dashboard/diagnostics` — explicit backend diagnostics with pass/fail details.
+
+Task aggregates are computed from SQLite rather than from browser-side guesses. No synthetic task, worker, model or performance data is generated.
 
 ## UI structure
 
