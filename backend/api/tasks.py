@@ -20,8 +20,10 @@ TASK_STORE: dict[str, dict] = {}
 async def create_task(task: TaskRequest) -> TaskResponse:
     """Create and execute a task through the Agent Runtime."""
     task_id = task.task_id or str(uuid.uuid4())
-    now = time.time()
+    if task_id in TASK_STORE:
+        raise HTTPException(status_code=409, detail="Task ID already exists.")
 
+    now = time.time()
     TASK_STORE[task_id] = {
         "id": task_id,
         "prompt": task.prompt,
@@ -58,7 +60,10 @@ async def create_task(task: TaskRequest) -> TaskResponse:
 
         nested = result.get("result")
         if isinstance(nested, dict):
-            TASK_STORE[task_id]["metadata"]["steps"] = nested.get("steps", 1)
+            TASK_STORE[task_id]["metadata"].update({
+                "steps": nested.get("steps", 1),
+                "orchestration_mode": nested.get("mode", "single"),
+            })
 
         return TaskResponse(**TASK_STORE[task_id])
 
