@@ -14,6 +14,7 @@ class LargeTaskOrchestrator:
         generate: Callable[..., dict[str, Any]],
         threshold: int = 12000,
         max_steps: int = 12,
+        max_retries: int = 1,
         context_chars: int = 12000,
         mission_context_chars: int = 28000,
         mission_chunk_chars: int = 16000,
@@ -21,6 +22,7 @@ class LargeTaskOrchestrator:
         self.generate = generate
         self.threshold = threshold
         self.max_steps = max_steps
+        self.max_retries = max(0, max_retries)
         self.context_chars = context_chars
         self.mission_context_chars = mission_context_chars
         self.mission_chunk_chars = mission_chunk_chars
@@ -29,8 +31,17 @@ class LargeTaskOrchestrator:
     def _text(response: dict[str, Any]) -> str:
         return str(response.get("response", "")).strip()
 
+    def _call_with_retry(self, prompt: str, timeout: int) -> dict[str, Any]:
+        last_error: Exception | None = None
+        for _attempt in range(self.max_retries + 1):
+            try:
+                return self.generate(prompt, timeout=timeout)
+            except Exception as exc:
+                last_error = exc
+        assert last_error is not None
+        raise last_error
+
     def _mission_context(self, prompt: str, timeout: int) -> str:
-        """Keep very large missions inside the model context without rejecting them."""
         if len(prompt) <= self.mission_context_chars:
             return prompt
 
@@ -48,13 +59,12 @@ identifiers and code/API names exactly when present.
 MISSION PART {index}/{len(chunks)}:
 {chunk}
 """
-            response = self.generate(summary_prompt, timeout=timeout)
+            response = self._call_with_retry(summary_prompt, timeout)
             summaries.append(f"PART {index}:\n{self._text(response)}")
 
-        combined = "\n\n".join(summaries)
-        return combined[: self.mission_context_chars]
+        return "\n\n".join(summaries)[: self.mission_context_chars]
 
-    def _plan(self, mission: str, model: str, timeout: int) -> list[str]:
+    def _plan(self, mission: str, timeout: int) -> list[str]:
         planner_prompt = f"""You are the planning component of an AI agent.
 
 Break the user's mission into a small sequence of concrete execution steps.
@@ -65,7 +75,7 @@ and ordered so that later steps can use earlier results.
 USER MISSION:
 {mission}
 """
-        response = self.generate(planner_prompt, timeout=timeout)
+        response = self._call_with_retry(planner_prompt, timeout)
         text = self._text(response)
         steps: list[str] = []
         for line in text.splitlines():
@@ -82,9 +92,8 @@ USER MISSION:
         model: str,
         timeout: int,
     ) -> dict[str, Any]:
-        """Execute either one model call or a multi-step large-task workflow."""
         if len(prompt) < self.threshold:
-            response = self.generate(prompt, timeout=timeout)
+            response = self._call_with_retry(prompt, timeout)
             return {
                 "mode": "single",
                 "steps": 1,
@@ -93,7 +102,7 @@ USER MISSION:
             }
 
         mission = self._mission_context(prompt, timeout)
-        plan = self._plan(mission, model, timeout)
+        plan = self._plan(mission, timeout)
         completed: list[dict[str, Any]] = []
         shared_context = ""
 
@@ -116,7 +125,7 @@ Complete this step carefully. Return the useful result of this step, not a
 plan for a future step. Preserve concrete details that later steps may need.
 """
             try:
-                response = self.generate(step_prompt, timeout=timeout)
+                response = self._call_with_retry(step_prompt, timeout)
                 result = self._text(response)
                 completed.append({
                     "step": index,
@@ -149,14 +158,13 @@ MISSION CONTEXT:
 COMPLETED RESULTS:
 {shared_context[-self.context_chars:]}
 """
-        final_response = self.generate(synthesis_prompt, timeout=timeout)
-        final_text = self._text(final_response)
+        final_response = self._call_with_retry(synthesis_prompt, timeout)
 
         return {
             "mode": "multi_step",
             "steps": len(plan),
             "plan": plan,
             "execution": completed,
-            "result": final_text,
+            "result": self._text(final_response),
             "raw": final_response,
         }
