@@ -7,7 +7,7 @@ import traceback
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from agent_core.execution_agent import AgentExecutionError, AgentExecutor
 from backend.services.ollama_service import OllamaService
@@ -15,14 +15,44 @@ from config.worker_config import DEFAULT_MODEL, OLLAMA_HOST, WORKER_TIMEOUT
 
 logger = logging.getLogger("ai_agent_worker")
 
+MAX_PROMPT_CHARS = 200_000
+MAX_TASK_ID_CHARS = 128
+MAX_MODEL_CHARS = 128
+MAX_TIMEOUT_SECONDS = 1800
+MAX_METADATA_KEYS = 64
+MAX_AGENT_STEPS = 32
+
 
 class ExecuteRequest(BaseModel):
     task: str | None = None
-    prompt: str | None = None
-    model: str | None = None
-    task_id: str | None = None
-    timeout: int | None = Field(default=None, ge=1)
+    prompt: str | None = Field(default=None, max_length=MAX_PROMPT_CHARS)
+    model: str | None = Field(default=None, max_length=MAX_MODEL_CHARS)
+    task_id: str | None = Field(default=None, max_length=MAX_TASK_ID_CHARS)
+    timeout: int | None = Field(default=None, ge=1, le=MAX_TIMEOUT_SECONDS)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("prompt", "task")
+    @classmethod
+    def normalize_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
+    @field_validator("model", "task_id")
+    @classmethod
+    def normalize_optional_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
+    @field_validator("metadata")
+    @classmethod
+    def validate_metadata(cls, value: dict[str, Any]) -> dict[str, Any]:
+        if len(value) > MAX_METADATA_KEYS:
+            raise ValueError(f"Task metadata cannot contain more than {MAX_METADATA_KEYS} keys.")
+        return value
 
 
 class Worker:
@@ -36,11 +66,26 @@ class Worker:
             prompt = job.get("prompt") or job.get("task")
             if not prompt or not str(prompt).strip():
                 raise ValueError("Task prompt is required.")
+            prompt = str(prompt).strip()
+            if len(prompt) > MAX_PROMPT_CHARS:
+                raise ValueError(f"Task prompt cannot exceed {MAX_PROMPT_CHARS} characters.")
 
-            model = job.get("model") or DEFAULT_MODEL
+            model = str(job.get("model") or DEFAULT_MODEL).strip()
+            if not model or len(model) > MAX_MODEL_CHARS:
+                raise ValueError(f"Model identifier must be between 1 and {MAX_MODEL_CHARS} characters.")
+
             timeout = int(job.get("timeout") or WORKER_TIMEOUT)
+            if timeout < 1 or timeout > MAX_TIMEOUT_SECONDS:
+                raise ValueError(f"Worker timeout must be between 1 and {MAX_TIMEOUT_SECONDS} seconds.")
+
             metadata = job.get("metadata") or {}
+            if not isinstance(metadata, dict) or len(metadata) > MAX_METADATA_KEYS:
+                raise ValueError(f"Task metadata cannot contain more than {MAX_METADATA_KEYS} keys.")
             workspace = metadata.get("workspace")
+
+            requested_steps = int(metadata.get("max_agent_steps", 12))
+            if requested_steps < 1 or requested_steps > MAX_AGENT_STEPS:
+                raise ValueError(f"max_agent_steps must be between 1 and {MAX_AGENT_STEPS}.")
 
             logger.info(
                 "Executing task_id=%s model=%s prompt_length=%s timeout=%s mode=agentic",
@@ -51,9 +96,12 @@ class Worker:
             executor = AgentExecutor(
                 service,
                 workspace_root=workspace,
-                max_steps=int(metadata.get("max_agent_steps", 12)),
+                max_steps=requested_steps,
             )
-            result = executor.execute(str(prompt))
+            result = executor.execute(prompt)
+
+            if result.get("status") != "completed" or not result.get("execution_evidence", {}).get("verified", False):
+                raise AgentExecutionError("Agent execution completed without verified execution evidence.")
 
             return {
                 "status": "completed",
@@ -67,7 +115,7 @@ class Worker:
 
 
 worker = Worker("pc-worker-01")
-app = FastAPI(title="AI Agent Platform Worker", version="0.3.0")
+app = FastAPI(title="AI Agent Platform Worker", version="0.4.0")
 
 
 @app.get("/health")
@@ -79,6 +127,8 @@ def health() -> dict[str, Any]:
         "ollama": OLLAMA_HOST,
         "model": DEFAULT_MODEL,
         "execution_mode": "agentic",
+        "max_timeout_seconds": MAX_TIMEOUT_SECONDS,
+        "max_agent_steps": MAX_AGENT_STEPS,
     }
 
 
