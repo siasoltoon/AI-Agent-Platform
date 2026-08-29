@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
 import traceback
 from typing import Any
 
@@ -59,9 +61,17 @@ class Worker:
     def __init__(self, worker_id: str):
         self.worker_id = worker_id
         self.status = "idle"
+        self.started_at: float | None = None
+        self.last_completed_at: float | None = None
+        self.last_error: str | None = None
+        self._execution_lock = threading.Lock()
 
     def execute(self, job: dict[str, Any]) -> dict[str, Any]:
+        if not self._execution_lock.acquire(blocking=False):
+            raise RuntimeError("Worker is busy executing another task.")
         self.status = "running"
+        self.started_at = time.time()
+        self.last_error = None
         try:
             prompt = job.get("prompt") or job.get("task")
             if not prompt or not str(prompt).strip():
@@ -87,35 +97,27 @@ class Worker:
             if requested_steps < 1 or requested_steps > MAX_AGENT_STEPS:
                 raise ValueError(f"max_agent_steps must be between 1 and {MAX_AGENT_STEPS}.")
 
-            logger.info(
-                "Executing task_id=%s model=%s prompt_length=%s timeout=%s mode=agentic",
-                job.get("task_id"), model, len(prompt), timeout,
-            )
-
+            logger.info("Executing task_id=%s model=%s prompt_length=%s timeout=%s mode=agentic", job.get("task_id"), model, len(prompt), timeout)
             service = OllamaService(base_url=OLLAMA_HOST, model=model, timeout=timeout)
-            executor = AgentExecutor(
-                service,
-                workspace_root=workspace,
-                max_steps=requested_steps,
-            )
+            executor = AgentExecutor(service, workspace_root=workspace, max_steps=requested_steps)
             result = executor.execute(prompt)
 
             if result.get("status") != "completed" or not result.get("execution_evidence", {}).get("verified", False):
                 raise AgentExecutionError("Agent execution completed without verified execution evidence.")
 
-            return {
-                "status": "completed",
-                "worker_id": self.worker_id,
-                "task_id": job.get("task_id"),
-                "model": model,
-                "result": result,
-            }
+            self.last_completed_at = time.time()
+            return {"status": "completed", "worker_id": self.worker_id, "task_id": job.get("task_id"), "model": model, "result": result}
+        except Exception as exc:
+            self.last_error = str(exc)
+            raise
         finally:
             self.status = "idle"
+            self.started_at = None
+            self._execution_lock.release()
 
 
 worker = Worker("pc-worker-01")
-app = FastAPI(title="AI Agent Platform Worker", version="0.4.0")
+app = FastAPI(title="AI Agent Platform Worker", version="0.5.0")
 
 
 @app.get("/health")
@@ -129,6 +131,8 @@ def health() -> dict[str, Any]:
         "execution_mode": "agentic",
         "max_timeout_seconds": MAX_TIMEOUT_SECONDS,
         "max_agent_steps": MAX_AGENT_STEPS,
+        "last_completed_at": worker.last_completed_at,
+        "last_error": worker.last_error,
     }
 
 
@@ -136,16 +140,10 @@ def health() -> dict[str, Any]:
 def execute(request: ExecuteRequest) -> dict[str, Any]:
     try:
         return worker.execute(request.model_dump())
-    except (AgentExecutionError, ValueError) as exc:
+    except (AgentExecutionError, ValueError, RuntimeError) as exc:
         logger.error("Agent execution failed: %s: %s", type(exc).__name__, exc)
-        raise HTTPException(
-            status_code=422,
-            detail={"message": "Agent could not complete the task.", "error": str(exc), "task_id": request.task_id},
-        ) from exc
+        raise HTTPException(status_code=422, detail={"message": "Agent could not complete the task.", "error": str(exc), "task_id": request.task_id}) from exc
     except Exception as exc:
         worker.status = "idle"
         logger.error("Worker execution failed: %s\n%s", exc, traceback.format_exc())
-        raise HTTPException(
-            status_code=500,
-            detail={"message": "Worker execution failed.", "error_type": type(exc).__name__, "error": str(exc), "task_id": request.task_id},
-        ) from exc
+        raise HTTPException(status_code=500, detail={"message": "Worker execution failed.", "error_type": type(exc).__name__, "error": str(exc), "task_id": request.task_id}) from exc
