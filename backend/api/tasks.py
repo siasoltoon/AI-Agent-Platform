@@ -19,6 +19,7 @@ runtime = AgentRuntime()
 command_registry = CommandRegistry()
 task_router = TaskRouter(command_registry)
 TASK_STORE = TaskStore(os.getenv("TASK_DB_PATH", "data/tasks.db"))
+TASK_RUNNER = None
 
 
 def _execute_agent_task(task: TaskRequest, *, task_id: str) -> dict:
