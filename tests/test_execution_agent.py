@@ -20,14 +20,15 @@ class FakeOllama:
 def test_agent_executor_writes_real_file(tmp_path: Path):
     ollama = FakeOllama([
         '{"action":"write_file","tool":"write_file","args":{"path":"hello.txt","content":"hello world"}}',
-        '{"action":"done","summary":"Created hello.txt"}',
+        '{"action":"read_file","args":{"path":"hello.txt"}}',
+        '{"action":"done","summary":"Created and verified hello.txt"}',
     ])
     result = AgentExecutor(ollama, workspace_root=str(tmp_path)).execute("Create hello.txt")
     assert result["status"] == "completed"
     assert result["execution_mode"] == "agentic"
     assert (tmp_path / "hello.txt").read_text(encoding="utf-8") == "hello world"
     assert result["execution_evidence"]["verified"] is True
-    assert result["execution_evidence"]["checks"][0]["passed"] is True
+    assert all(check["passed"] for check in result["execution_evidence"]["checks"])
     assert result["tool_records"][0]["ok"] is True
 
 
@@ -39,6 +40,24 @@ def test_agent_executor_accepts_tool_shorthand(tmp_path: Path):
     result = AgentExecutor(ollama, workspace_root=str(tmp_path)).execute("Create hello.txt")
     assert result["status"] == "completed"
     assert (tmp_path / "hello.txt").read_text(encoding="utf-8") == "hello world"
+
+
+def test_agent_executor_accepts_file_path_alias(tmp_path: Path):
+    ollama = FakeOllama([
+        '{"action":"write_file","args":{"file_path":"agent-test.txt","content":"AI Agent Platform Production Test\\nHello World"}}',
+        '{"action":"read_file","args":{"file_path":"agent-test.txt"}}',
+        '{"action":"done","summary":"Created and verified agent-test.txt"}',
+    ])
+    result = AgentExecutor(ollama, workspace_root=str(tmp_path)).execute(
+        "Create agent-test.txt with the requested content and verify it."
+    )
+    assert result["status"] == "completed"
+    assert (tmp_path / "agent-test.txt").read_text(encoding="utf-8") == "AI Agent Platform Production Test\nHello World"
+    assert result["execution_evidence"]["verified"] is True
+    assert any(
+        check["type"] == "file_content_matches_write" and check["passed"]
+        for check in result["execution_evidence"]["checks"]
+    )
 
 
 def test_agent_executor_rejects_completion_without_execution(tmp_path: Path):
