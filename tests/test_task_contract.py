@@ -1,3 +1,4 @@
+import pytest
 from pydantic import ValidationError
 
 from task_engine.contracts import (
