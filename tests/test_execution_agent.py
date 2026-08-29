@@ -54,10 +54,19 @@ def test_agent_executor_accepts_file_path_alias(tmp_path: Path):
     assert result["status"] == "completed"
     assert (tmp_path / "agent-test.txt").read_text(encoding="utf-8") == "AI Agent Platform Production Test\nHello World"
     assert result["execution_evidence"]["verified"] is True
-    assert any(
-        check["type"] == "file_content_matches_write" and check["passed"]
-        for check in result["execution_evidence"]["checks"]
-    )
+    assert any(check["type"] == "file_content_matches_write" and check["passed"] for check in result["execution_evidence"]["checks"])
+
+
+def test_agent_executor_accepts_windows_type_alias(tmp_path: Path):
+    (tmp_path / "alias.txt").write_text("alias works", encoding="utf-8")
+    ollama = FakeOllama([
+        '{"action":"tool","tool":"type","args":{"path":"alias.txt"}}',
+        '{"action":"done","summary":"Read alias.txt"}',
+    ])
+    result = AgentExecutor(ollama, workspace_root=str(tmp_path), max_steps=2).execute("Read alias.txt")
+    assert result["status"] == "completed"
+    assert result["tool_records"][0]["ok"] is True
+    assert "alias works" in result["tool_records"][0]["result"]["stdout"]
 
 
 def test_agent_executor_rejects_completion_without_execution(tmp_path: Path):
