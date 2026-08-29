@@ -10,6 +10,7 @@ The `feature/task-contract-v1` runtime now supports automatic large-task orchest
   2. bounded planning
   3. sequential step execution
   4. final synthesis
+- Transient model/worker failures are retried according to `MAX_STEP_RETRIES`.
 
 The API does not reject large prompts merely because they are large. The runtime
 only changes execution strategy. The actual Ollama model context remains the
@@ -22,6 +23,7 @@ WORKER_TIMEOUT=300
 LARGE_TASK_TIMEOUT=1800
 LARGE_TASK_THRESHOLD=12000
 MAX_PLAN_STEPS=12
+MAX_STEP_RETRIES=1
 STEP_CONTEXT_CHARS=12000
 MISSION_CONTEXT_CHARS=28000
 MISSION_CHUNK_CHARS=16000
@@ -38,6 +40,7 @@ Dashboard
   -> /tasks/create
   -> AgentRuntime
   -> LargeTaskOrchestrator
+  -> mission context
   -> planner call
   -> step 1 ... step N
   -> final synthesis call
