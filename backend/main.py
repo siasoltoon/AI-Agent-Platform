@@ -118,3 +118,9 @@ async def dashboard_js():
     if not js_file.exists():
         return {"status": "error", "message": "Dashboard app.js not found."}
     return FileResponse(js_file, media_type="application/javascript")
+
+
+@app.get("/tasks/", include_in_schema=False)
+async def dashboard_task_list() -> dict:
+    """Compatibility endpoint for the dashboard's exact GET /tasks/ request."""
+    return {"tasks": tasks.TASK_STORE.list()}
