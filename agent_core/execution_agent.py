@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from backend.services.ollama_service import OllamaService
 from tool_system.file_tools import ReadFileTool, WriteFileTool
@@ -18,6 +18,8 @@ class AgentExecutionError(RuntimeError):
 
 class AgentExecutor:
     """Execute coding tasks through a bounded plan/act/observe loop."""
+
+    _TOOLS = {"read_file", "write_file", "terminal"}
 
     def __init__(
         self,
@@ -35,6 +37,8 @@ class AgentExecutor:
         self.terminal = TerminalTool()
 
     def _safe_path(self, path: str) -> Path:
+        if not path.strip():
+            raise AgentExecutionError("Path cannot be empty.")
         candidate = (self.workspace / path).resolve()
         if candidate != self.workspace and self.workspace not in candidate.parents:
             raise AgentExecutionError("Path escapes the configured workspace.")
@@ -44,7 +48,11 @@ class AgentExecutor:
     def _extract_json(text: str) -> dict[str, Any]:
         text = text.strip()
         candidates = [text]
-        fenced = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL | re.IGNORECASE)
+        fenced = re.findall(
+            r"```(?:json)?\s*(\{.*?\})\s*```",
+            text,
+            re.DOTALL | re.IGNORECASE,
+        )
         candidates.extend(fenced)
         for candidate in candidates:
             try:
@@ -63,6 +71,18 @@ class AgentExecutor:
                 pass
         raise AgentExecutionError("Model did not return a valid JSON action.")
 
+    @staticmethod
+    def _normalize_decision(decision: dict[str, Any]) -> dict[str, Any]:
+        """Accept the canonical contract and the common tool-action shorthand."""
+        action = decision.get("action")
+        if action in AgentExecutor._TOOLS and "tool" not in decision:
+            decision = {
+                **decision,
+                "action": "tool",
+                "tool": action,
+            }
+        return decision
+
     def _tool(self, name: str, args: dict[str, Any]) -> Any:
         if name == "read_file":
             path = self._safe_path(str(args.get("path", "")))
@@ -80,6 +100,9 @@ class AgentExecutor:
         raise AgentExecutionError(f"Unknown tool: {name}")
 
     def execute(self, task: str) -> dict[str, Any]:
+        if not task or not task.strip():
+            raise AgentExecutionError("Task cannot be empty.")
+
         system = """You are an autonomous coding agent. You MUST perform the requested task in the workspace, not merely suggest code.
 
 Return exactly one JSON object per turn, with no prose:
@@ -101,7 +124,7 @@ Rules:
         for step in range(1, self.max_steps + 1):
             response = self.ollama.generate(conversation, timeout=self.ollama.timeout)
             text = response.get("response", "")
-            decision = self._extract_json(text)
+            decision = self._normalize_decision(self._extract_json(text))
             action = decision.get("action")
             actions.append({"step": step, "decision": decision})
 
@@ -118,6 +141,8 @@ Rules:
 
             tool = str(decision.get("tool", ""))
             args = decision.get("args", {})
+            if tool not in self._TOOLS:
+                raise AgentExecutionError(f"Unknown tool: {tool}")
             if not isinstance(args, dict):
                 raise AgentExecutionError("Tool args must be an object.")
 
@@ -125,6 +150,9 @@ Rules:
             serialized = json.dumps(result, ensure_ascii=False, default=str)
             if len(serialized) > self.max_output_chars:
                 serialized = serialized[: self.max_output_chars] + "...<truncated>"
-            conversation += f"\n\nOBSERVATION step {step}: tool={tool}\n{serialized}\n\nContinue with the next action or return done."
+            conversation += (
+                f"\n\nOBSERVATION step {step}: tool={tool}\n"
+                f"{serialized}\n\nContinue with the next action or return done."
+            )
 
         raise AgentExecutionError(f"Agent exceeded maximum execution steps ({self.max_steps}).")
