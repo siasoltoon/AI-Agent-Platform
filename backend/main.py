@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse
 
 from backend.api import agents
 from backend.api import tasks
+from config.production_config import CONFIG
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -27,10 +28,10 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=list(CONFIG.cors_origins),
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 
@@ -45,13 +46,19 @@ async def health() -> dict:
         "status": "running",
         "service": "AI-Agent-Platform",
         "version": app.version,
+        "environment": CONFIG.environment,
     }
 
 
 @app.get("/health/live", tags=["Health"])
 async def liveness() -> dict:
     """Process-level liveness probe: no dependency checks are required."""
-    return {"status": "ok", "service": app.title, "version": app.version}
+    return {
+        "status": "ok",
+        "service": app.title,
+        "version": app.version,
+        "environment": CONFIG.environment,
+    }
 
 
 @app.get("/health/ready", tags=["Health"])
@@ -59,13 +66,12 @@ async def readiness() -> dict:
     """Readiness probe that verifies the durable task store is reachable."""
     try:
         storage_ready = tasks.TASK_STORE.ping()
-    except Exception as exc:
+    except Exception:
         return {
             "status": "not_ready",
             "service": app.title,
             "version": app.version,
             "checks": {"task_store": "failed"},
-            "error": str(exc),
         }
 
     return {
