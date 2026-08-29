@@ -36,7 +36,7 @@ command_registry.register("agent.execute", _execute_agent_task)
 
 
 async def _create_task(task: TaskRequest) -> TaskResponse:
-    """Create, execute, persist, and return a real task result."""
+    """Persist a task and let the background runner execute it."""
     task_id = task.task_id or str(uuid.uuid4())
     if TASK_STORE.get(task_id) is not None:
         raise HTTPException(status_code=409, detail="Task ID already exists.")
@@ -65,66 +65,24 @@ async def _create_task(task: TaskRequest) -> TaskResponse:
             **task.metadata,
             "prompt_length": len(task.prompt),
             "command": command,
+            "timeout_seconds": task.timeout_seconds,
         },
     }
     try:
         TASK_STORE.create(record)
-        TASK_STORE.update(task_id, status=TaskStatus.RUNNING.value, started_at=time.time())
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Task persistence is unavailable.") from exc
 
-    try:
-        result = task_router.route(task, task_id=task_id)
-        current = TASK_STORE.get(task_id)
-        metadata = {"execution_mode": result.get("execution_mode", "agentic")}
-        nested = result.get("result")
-        if isinstance(nested, dict):
-            metadata.update(
-                {
-                    "steps": nested.get("steps", 1),
-                    "orchestration_mode": nested.get("mode", "agentic"),
-                }
-            )
-        task_record = TASK_STORE.update(
-            task_id,
-            status=TaskStatus.COMPLETED.value,
-            completed_at=time.time(),
-            result=result,
-            metadata={**(current or {}).get("metadata", {}), **metadata},
-        )
-        return TaskResponse(**task_record)
-    except TimeoutError as exc:
-        error = str(exc) or "Task execution timed out."
-        TASK_STORE.update(
-            task_id,
-            status=TaskStatus.FAILED.value,
-            completed_at=time.time(),
-            error=error,
-        )
-        raise HTTPException(
-            status_code=504,
-            detail={"task_id": task_id, "message": "Task execution timed out.", "error": error},
-        ) from exc
-    except Exception as exc:
-        TASK_STORE.update(
-            task_id,
-            status=TaskStatus.FAILED.value,
-            completed_at=time.time(),
-            error=str(exc),
-        )
-        raise HTTPException(
-            status_code=502,
-            detail={"task_id": task_id, "message": "Task execution failed.", "error": str(exc)},
-        ) from exc
+    return TaskResponse(**record)
 
 
 # The web dashboard uses POST /tasks/. Keep /tasks/create as a compatibility alias.
-@router.post("/", response_model=TaskResponse)
+@router.post("/", response_model=TaskResponse, status_code=202)
 async def create_task(task: TaskRequest) -> TaskResponse:
     return await _create_task(task)
 
 
-@router.post("/create", response_model=TaskResponse, include_in_schema=False)
+@router.post("/create", response_model=TaskResponse, status_code=202, include_in_schema=False)
 async def create_task_legacy(task: TaskRequest) -> TaskResponse:
     return await _create_task(task)
 
