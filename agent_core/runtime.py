@@ -68,12 +68,12 @@ class AgentRuntime:
     def _validate_worker_result(response: dict[str, Any]) -> None:
         """Reject false-positive worker responses before a task can be marked completed."""
         if not isinstance(response, dict):
-            raise RuntimeError("Worker returned an invalid execution response.")
+            raise RuntimeError("Worker returned an invalid execution response without verified execution evidence.")
         if response.get("status") != "completed":
             raise RuntimeError("Worker did not report a completed execution.")
         result = response.get("result")
         if not isinstance(result, dict):
-            raise RuntimeError("Worker returned no structured execution result.")
+            raise RuntimeError("Worker returned no structured execution result or verified execution evidence.")
         evidence = result.get("execution_evidence")
         if not isinstance(evidence, dict) or evidence.get("verified") is not True:
             raise RuntimeError("Worker reported completion without verified execution evidence.")
