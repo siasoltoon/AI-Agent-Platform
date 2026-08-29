@@ -1,3 +1,4 @@
+import React from "react";
 import TaskPanel from "../components/TaskPanel";
 import AgentStatus from "../components/AgentStatus";
 import WorkerStatus from "../components/WorkerStatus";
