@@ -260,10 +260,17 @@ class AgentExecutor:
                 result = record.get("result", {})
                 checks.append({"type": "terminal_success", "command": result.get("command"), "passed": result.get("code") == 0})
 
+        lower = task.lower()
+        verification_requested = any(word in lower for word in ("verify", "check", "confirm", "ensure", "exactly", "read"))
         required = [check for check in checks if check["type"] != "terminal_success"]
         failed_checks = [check for check in required if not check.get("passed")]
         mutating = any(record.get("tool") in self._MUTATING_TOOLS for record in successful)
+
+        # Exploratory failures can be recovered from. Explicit verification requests,
+        # however, still require an actual read action in the agent trace.
         verified = bool(successful) and not failed_checks
+        if writes and verification_requested and not reads:
+            verified = False
         if mutating and not required:
             verified = False
 
