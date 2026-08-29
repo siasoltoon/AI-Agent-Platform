@@ -2,7 +2,9 @@ import pytest
 from pydantic import ValidationError
 
 from task_engine.contracts import (
+    MAX_METADATA_CHARS,
     MAX_METADATA_KEYS,
+    MAX_MODEL_CHARS,
     MAX_PROMPT_CHARS,
     MAX_TASK_ID_CHARS,
     MAX_TIMEOUT_SECONDS,
@@ -34,6 +36,11 @@ def test_task_request_normalizes_model():
     assert request.model == "qwen2.5-coder:7b"
 
 
+def test_task_request_rejects_oversized_model():
+    with pytest.raises(ValidationError):
+        TaskRequest(prompt="hello", model="x" * (MAX_MODEL_CHARS + 1))
+
+
 def test_task_request_normalizes_task_id():
     request = TaskRequest(prompt="hello", task_id="  task-123  ")
     assert request.task_id == "task-123"
@@ -55,6 +62,11 @@ def test_task_request_rejects_too_many_metadata_keys():
     metadata = {f"key-{i}": i for i in range(MAX_METADATA_KEYS + 1)}
     with pytest.raises(ValidationError):
         TaskRequest(prompt="hello", metadata=metadata)
+
+
+def test_task_request_rejects_oversized_metadata():
+    with pytest.raises(ValidationError):
+        TaskRequest(prompt="hello", metadata={"payload": "x" * MAX_METADATA_CHARS})
 
 
 def test_task_status_values_are_stable():
