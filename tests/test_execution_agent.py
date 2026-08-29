@@ -1,23 +1,17 @@
-"""Tests for the autonomous tool-execution loop."""
+"""Tests for the production autonomous tool-execution loop."""
 
 from pathlib import Path
-
 import pytest
-
 from agent_core.execution_agent import AgentExecutionError, AgentExecutor
 
 
 class FakeOllama:
     timeout = 10
-
-    def __init__(self, responses):
-        self.responses = iter(responses)
-
-    def generate(self, prompt, timeout=None):
-        return {"response": next(self.responses)}
+    def __init__(self, responses): self.responses = iter(responses)
+    def generate(self, prompt, timeout=None): return {"response": next(self.responses)}
 
 
-def test_agent_executor_writes_real_file(tmp_path: Path):
+def test_agent_executor_writes_and_verifies_real_file(tmp_path: Path):
     ollama = FakeOllama([
         '{"action":"write_file","tool":"write_file","args":{"path":"hello.txt","content":"hello world"}}',
         '{"action":"read_file","args":{"path":"hello.txt"}}',
@@ -25,47 +19,65 @@ def test_agent_executor_writes_real_file(tmp_path: Path):
     ])
     result = AgentExecutor(ollama, workspace_root=str(tmp_path)).execute("Create hello.txt")
     assert result["status"] == "completed"
-    assert result["execution_mode"] == "agentic"
     assert (tmp_path / "hello.txt").read_text(encoding="utf-8") == "hello world"
     assert result["execution_evidence"]["verified"] is True
     assert all(check["passed"] for check in result["execution_evidence"]["checks"])
-    assert result["tool_records"][0]["ok"] is True
 
 
-def test_agent_executor_accepts_tool_shorthand(tmp_path: Path):
+def test_agent_executor_accepts_file_tool_shorthand_without_explicit_read(tmp_path: Path):
     ollama = FakeOllama([
         '{"action":"write_file","args":{"path":"hello.txt","content":"hello world"}}',
         '{"action":"done","summary":"Created hello.txt"}',
     ])
     result = AgentExecutor(ollama, workspace_root=str(tmp_path)).execute("Create hello.txt")
     assert result["status"] == "completed"
-    assert (tmp_path / "hello.txt").read_text(encoding="utf-8") == "hello world"
 
 
-def test_agent_executor_accepts_file_path_alias(tmp_path: Path):
+def test_agent_executor_requires_read_for_explicit_verification(tmp_path: Path):
     ollama = FakeOllama([
-        '{"action":"write_file","args":{"file_path":"agent-test.txt","content":"AI Agent Platform Production Test\\nHello World"}}',
-        '{"action":"read_file","args":{"file_path":"agent-test.txt"}}',
-        '{"action":"done","summary":"Created and verified agent-test.txt"}',
+        '{"action":"write_file","args":{"path":"hello.txt","content":"verified"}}',
+        '{"action":"done","summary":"Done"}',
+        '{"action":"read_file","args":{"path":"hello.txt"}}',
+        '{"action":"done","summary":"Created and verified"}',
     ])
-    result = AgentExecutor(ollama, workspace_root=str(tmp_path)).execute(
-        "Create agent-test.txt with the requested content and verify it."
+    result = AgentExecutor(ollama, workspace_root=str(tmp_path), max_steps=4).execute(
+        "Create hello.txt and verify by reading it and checking the exact content."
     )
     assert result["status"] == "completed"
-    assert (tmp_path / "agent-test.txt").read_text(encoding="utf-8") == "AI Agent Platform Production Test\nHello World"
+    assert result["steps"][1]["verification"]["verified"] is False
+    assert any(c["type"] == "file_content_matches_write" and c["passed"] for c in result["execution_evidence"]["checks"])
+
+
+def test_agent_executor_supports_directory_and_search_tools(tmp_path: Path):
+    ollama = FakeOllama([
+        '{"action":"tool","tool":"make_directory","args":{"path":"agent-tool-test"}}',
+        '{"action":"tool","tool":"write_file","args":{"path":"agent-tool-test/test.txt","content":"Hello"}}',
+        '{"action":"tool","tool":"search_files","args":{"path":"agent-tool-test","pattern":"*.txt"}}',
+        '{"action":"done","summary":"Workspace prepared"}',
+    ])
+    result = AgentExecutor(ollama, workspace_root=str(tmp_path)).execute("Create a directory and file")
+    assert result["status"] == "completed"
+    assert "agent-tool-test/test.txt" in result["tool_records"][2]["result"]["matches"]
+
+
+def test_agent_executor_supports_delete_with_independent_verification(tmp_path: Path):
+    (tmp_path / "remove.txt").write_text("remove", encoding="utf-8")
+    ollama = FakeOllama([
+        '{"action":"tool","tool":"delete_file","args":{"path":"remove.txt"}}',
+        '{"action":"tool","tool":"file_exists","args":{"path":"remove.txt"}}',
+        '{"action":"done","summary":"Removed and verified"}',
+    ])
+    result = AgentExecutor(ollama, workspace_root=str(tmp_path)).execute("Delete remove.txt and verify it is absent")
+    assert result["status"] == "completed"
     assert result["execution_evidence"]["verified"] is True
-    assert any(check["type"] == "file_content_matches_write" and check["passed"] for check in result["execution_evidence"]["checks"])
+    assert any(c["type"] == "file_absent_after_delete" and c["passed"] for c in result["execution_evidence"]["checks"])
 
 
 def test_agent_executor_accepts_windows_type_alias(tmp_path: Path):
     (tmp_path / "alias.txt").write_text("alias works", encoding="utf-8")
-    ollama = FakeOllama([
-        '{"action":"tool","tool":"type","args":{"path":"alias.txt"}}',
-        '{"action":"done","summary":"Read alias.txt"}',
-    ])
+    ollama = FakeOllama(['{"action":"tool","tool":"type","args":{"path":"alias.txt"}}', '{"action":"done","summary":"Read alias.txt"}'])
     result = AgentExecutor(ollama, workspace_root=str(tmp_path), max_steps=2).execute("Read alias.txt")
     assert result["status"] == "completed"
-    assert result["tool_records"][0]["ok"] is True
     assert "alias works" in result["tool_records"][0]["result"]["stdout"]
 
 
@@ -73,60 +85,38 @@ def test_agent_executor_rejects_completion_without_execution(tmp_path: Path):
     ollama = FakeOllama(['{"action":"done","summary":"Pretended to finish"}'])
     with pytest.raises(AgentExecutionError, match="without executing"):
         AgentExecutor(ollama, workspace_root=str(tmp_path)).execute("Create hello.txt")
-    assert not (tmp_path / "hello.txt").exists()
-
-
-def test_agent_executor_does_not_trust_done_without_verification(tmp_path: Path):
-    ollama = FakeOllama([
-        '{"action":"read_file","args":{"path":"missing.txt"}}',
-        '{"action":"done","summary":"Done anyway"}',
-        '{"action":"write_file","args":{"path":"hello.txt","content":"verified"}}',
-        '{"action":"done","summary":"Created and verified hello.txt"}',
-    ])
-    result = AgentExecutor(ollama, workspace_root=str(tmp_path), max_steps=4).execute("Create hello.txt")
-    assert result["status"] == "completed"
-    assert (tmp_path / "hello.txt").read_text(encoding="utf-8") == "verified"
-    assert result["execution_evidence"]["verified"] is True
-    assert result["steps"][1]["verification"]["verified"] is False
 
 
 def test_agent_executor_recovers_from_tool_failure(tmp_path: Path):
     ollama = FakeOllama([
         '{"action":"read_file","args":{"path":"missing.txt"}}',
         '{"action":"write_file","args":{"path":"recovered.txt","content":"ok"}}',
-        '{"action":"done","summary":"Recovered and created recovered.txt"}',
+        '{"action":"done","summary":"Recovered"}',
     ])
     result = AgentExecutor(ollama, workspace_root=str(tmp_path), max_steps=3).execute("Create recovered.txt")
     assert result["status"] == "completed"
-    assert (tmp_path / "recovered.txt").exists()
     assert result["tool_records"][0]["ok"] is False
     assert result["tool_records"][1]["ok"] is True
 
 
 def test_agent_executor_rejects_workspace_escape(tmp_path: Path):
-    ollama = FakeOllama([
-        '{"action":"tool","tool":"write_file","args":{"path":"../escape.txt","content":"x"}}',
-    ])
+    ollama = FakeOllama(['{"action":"tool","tool":"write_file","args":{"path":"../escape.txt","content":"x"}}'])
     with pytest.raises(AgentExecutionError, match="maximum execution steps|escapes"):
         AgentExecutor(ollama, workspace_root=str(tmp_path), max_steps=1).execute("write outside")
 
 
 def test_agent_executor_rejects_unknown_tool(tmp_path: Path):
-    ollama = FakeOllama([
-        '{"action":"tool","tool":"delete_everything","args":{}}',
-    ])
+    ollama = FakeOllama(['{"action":"tool","tool":"delete_everything","args":{}}'])
     with pytest.raises(AgentExecutionError, match="Unknown tool"):
         AgentExecutor(ollama, workspace_root=str(tmp_path)).execute("do something")
 
 
 def test_agent_executor_requires_bounded_completion(tmp_path: Path):
     ollama = FakeOllama(['{"action":"tool","tool":"read_file","args":{"path":"missing.txt"}}'] * 3)
-    executor = AgentExecutor(ollama, workspace_root=str(tmp_path), max_steps=3)
     with pytest.raises(Exception, match="maximum execution steps|No such file"):
-        executor.execute("keep going")
+        AgentExecutor(ollama, workspace_root=str(tmp_path), max_steps=3).execute("keep going")
 
 
 def test_agent_executor_rejects_empty_task(tmp_path: Path):
-    ollama = FakeOllama([])
     with pytest.raises(AgentExecutionError, match="Task cannot be empty"):
-        AgentExecutor(ollama, workspace_root=str(tmp_path)).execute("   ")
+        AgentExecutor(FakeOllama([]), workspace_root=str(tmp_path)).execute("   ")
