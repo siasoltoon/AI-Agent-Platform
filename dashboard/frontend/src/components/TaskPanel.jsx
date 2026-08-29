@@ -1,5 +1,7 @@
-import { useEffect, useState } from "react";
-import { createTask, getTasks } from "../api/tasks";
+import { useEffect, useRef, useState } from "react";
+import { createTask, getTask, getTasks } from "../api/tasks";
+
+const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
 function statusLabel(status) {
   return {
@@ -17,6 +19,7 @@ export default function TaskPanel() {
   const [tasks, setTasks] = useState([]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const pollTimer = useRef(null);
 
   async function refreshTasks() {
     try {
@@ -27,8 +30,34 @@ export default function TaskPanel() {
     }
   }
 
+  function stopPolling() {
+    if (pollTimer.current) {
+      clearTimeout(pollTimer.current);
+      pollTimer.current = null;
+    }
+  }
+
+  async function pollTask(taskId) {
+    try {
+      const current = await getTask(taskId);
+      setTask(current);
+      await refreshTasks();
+
+      if (!TERMINAL_STATUSES.has(current.status)) {
+        pollTimer.current = setTimeout(() => pollTask(taskId), 500);
+        return;
+      }
+
+      setSubmitting(false);
+    } catch (err) {
+      setError(err.message || "خطا در دریافت وضعیت اجرای Task");
+      setSubmitting(false);
+    }
+  }
+
   useEffect(() => {
     refreshTasks();
+    return stopPolling;
   }, []);
 
   async function handleCreateTask(event) {
@@ -36,27 +65,32 @@ export default function TaskPanel() {
     const value = prompt.trim();
     if (!value || submitting) return;
 
+    stopPolling();
     setSubmitting(true);
     setError("");
-    setTask({ prompt: value, status: "running" });
 
     try {
-      const result = await createTask({ prompt: value });
-      setTask(result);
+      const created = await createTask({ prompt: value });
+      setTask(created);
       setPrompt("");
       await refreshTasks();
+
+      if (created.id && !TERMINAL_STATUSES.has(created.status)) {
+        pollTimer.current = setTimeout(() => pollTask(created.id), 250);
+      } else {
+        setSubmitting(false);
+      }
     } catch (err) {
-      setError(err.message || "اجرای Task ناموفق بود.");
-      await refreshTasks();
-    } finally {
+      setError(err.message || "ثبت Task ناموفق بود.");
       setSubmitting(false);
+      await refreshTasks();
     }
   }
 
   return (
     <section className="task-panel">
       <h2>اجرای Task</h2>
-      <p>دستور واقعی را وارد کنید؛ Agent آن را در Worker اجرا می‌کند.</p>
+      <p>Task ثبت می‌شود، سپس Agent آن را در Worker اجرا می‌کند و وضعیت واقعی به‌روزرسانی می‌شود.</p>
 
       <form onSubmit={handleCreateTask}>
         <textarea
@@ -77,9 +111,7 @@ export default function TaskPanel() {
         <div className="task-result">
           <strong>وضعیت: {statusLabel(task.status)}</strong>
           <div>Task ID: {task.id || "—"}</div>
-          {task.result && (
-            <pre>{JSON.stringify(task.result, null, 2)}</pre>
-          )}
+          {task.result && <pre>{JSON.stringify(task.result, null, 2)}</pre>}
           {task.error && <div>خطا: {task.error}</div>}
         </div>
       )}
