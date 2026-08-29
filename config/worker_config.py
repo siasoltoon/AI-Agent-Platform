@@ -7,8 +7,15 @@ the AI Agent Platform controller and the execution worker.
 
 import os
 
+from dotenv import load_dotenv
+
+
+# Load local .env configuration when present.
+load_dotenv()
+
 
 # Worker connection
+# The controller runs on the laptop; the worker runs on the PC.
 WORKER_HOST = os.getenv(
     "WORKER_HOST",
     "127.0.0.1"
@@ -39,6 +46,7 @@ DEFAULT_MODEL = os.getenv(
 
 
 # Ollama endpoint
+# Ollama is accessed by the worker locally on the PC.
 OLLAMA_HOST = os.getenv(
     "OLLAMA_HOST",
     "http://127.0.0.1:11434"
