@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <title>AI Agent Platform</title>
+
+    <link
+        rel="stylesheet"
+        href="style.css"
+    >
+</head>
+
+<body>
+
+    <main class="container">
+
+        <h1>AI Agent Platform</h1>
+
+        <p class="subtitle">
+            Local AI Agent Control Panel
+        </p>
+
+
+        <section class="panel">
+
+            <label for="model">
+                Model
+            </label>
+
+            <input
+                id="model"
+                type="text"
+                value="qwen2.5-coder"
+            >
+
+
+            <label for="prompt">
+                Task
+            </label>
+
+            <textarea
+                id="prompt"
+                rows="8"
+                placeholder="Describe what you want the agent to do..."
+            ></textarea>
+
+
+            <button id="runButton">
+                Run Task
+            </button>
+
+        </section>
+
+
+        <section class="panel">
+
+            <h2>Status</h2>
+
+            <div id="status">
+                Idle
+            </div>
+
+        </section>
+
+
+        <section class="panel">
+
+            <h2>Result</h2>
+
+            <pre id="result">No result yet.</pre>
+
+        </section>
+
+
+        <section class="panel">
+
+            <h2>Task ID</h2>
+
+            <code id="taskId">
+                -
+            </code>
+
+        </section>
+
+    </main>
+
+
+    <script src="app.js"></script>
+
+</body>
+</html>
