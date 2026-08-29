@@ -16,6 +16,8 @@ from config.worker_config import (
     LARGE_TASK_THRESHOLD,
     LARGE_TASK_TIMEOUT,
     MAX_PLAN_STEPS,
+    MISSION_CHUNK_CHARS,
+    MISSION_CONTEXT_CHARS,
     STEP_CONTEXT_CHARS,
     WORKER_HOST,
     WORKER_PORT,
@@ -52,10 +54,7 @@ class AgentRuntime:
             },
             timeout=timeout,
         )
-        return {
-            "response": response.get("result", ""),
-            "raw": response,
-        }
+        return {"response": response.get("result", ""), "raw": response}
 
     def execute(
         self,
@@ -71,9 +70,8 @@ class AgentRuntime:
         prompt = prompt.strip()
         selected_model = model or self.default_model
         is_large = len(prompt) >= self.large_task_threshold
-        selected_timeout = (
-            timeout_seconds
-            or (self.large_task_timeout if is_large else self.timeout)
+        selected_timeout = timeout_seconds or (
+            self.large_task_timeout if is_large else self.timeout
         )
 
         if not is_large:
@@ -104,6 +102,8 @@ class AgentRuntime:
             threshold=self.large_task_threshold,
             max_steps=MAX_PLAN_STEPS,
             context_chars=STEP_CONTEXT_CHARS,
+            mission_context_chars=MISSION_CONTEXT_CHARS,
+            mission_chunk_chars=MISSION_CHUNK_CHARS,
         )
         orchestration = orchestrator.execute(
             prompt=prompt,
