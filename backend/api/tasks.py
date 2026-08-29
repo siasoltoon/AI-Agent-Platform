@@ -1,4 +1,4 @@
-"""Task API backed by the canonical Task Contract v1."""
+"""Task API backed by the canonical Task Contract v1 and durable lifecycle store."""
 
 from __future__ import annotations
 
@@ -23,7 +23,6 @@ TASK_RUNNER = None
 
 
 def _execute_agent_task(task: TaskRequest, *, task_id: str) -> dict:
-    """Default command: execute the task on the real agentic worker."""
     return runtime.execute(
         prompt=task.prompt,
         model=task.model,
@@ -37,7 +36,6 @@ command_registry.register("agent.execute", _execute_agent_task)
 
 
 async def _create_task(task: TaskRequest) -> TaskResponse:
-    """Persist a task and let the background runner execute it."""
     task_id = task.task_id or str(uuid.uuid4())
     if TASK_STORE.get(task_id) is not None:
         raise HTTPException(status_code=409, detail="Task ID already exists.")
@@ -46,10 +44,7 @@ async def _create_task(task: TaskRequest) -> TaskResponse:
         command = task_router.command_for(task)
         command_registry.resolve(command)
     except (KeyError, TypeError, ValueError) as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={"task_id": task_id, "message": "Invalid task command.", "error": str(exc)},
-        ) from exc
+        raise HTTPException(status_code=400, detail={"task_id": task_id, "message": "Invalid task command.", "error": str(exc)}) from exc
 
     now = time.time()
     record = {
@@ -73,11 +68,9 @@ async def _create_task(task: TaskRequest) -> TaskResponse:
         TASK_STORE.create(record)
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Task persistence is unavailable.") from exc
-
     return TaskResponse(**record)
 
 
-# The web dashboard uses POST /tasks/. Keep /tasks/create as a compatibility alias.
 @router.post("/", response_model=TaskResponse, status_code=202)
 async def create_task(task: TaskRequest) -> TaskResponse:
     return await _create_task(task)
@@ -96,6 +89,24 @@ async def get_task(task_id: str) -> TaskResponse:
     return TaskResponse(**task)
 
 
+@router.get("/{task_id}/events")
+async def get_task_events(task_id: str) -> dict:
+    if TASK_STORE.get(task_id) is None:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    return {"task_id": task_id, "events": TASK_STORE.events(task_id)}
+
+
+@router.post("/{task_id}/cancel", response_model=TaskResponse)
+async def cancel_task(task_id: str) -> TaskResponse:
+    try:
+        task = TASK_STORE.cancel(task_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Task not found.") from exc
+    return TaskResponse(**task)
+
+
 @router.get("", response_model=dict)
-async def list_tasks() -> dict:
-    return {"tasks": TASK_STORE.list()}
+async def list_tasks(limit: int = 100, status: str | None = None) -> dict:
+    if status is not None and status.strip().lower() not in {item.value for item in TaskStatus}:
+        raise HTTPException(status_code=400, detail="Invalid task status filter.")
+    return {"tasks": TASK_STORE.list(limit=limit, status=status)}
