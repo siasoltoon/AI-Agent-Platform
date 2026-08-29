@@ -1,8 +1,8 @@
 """
 Worker Configuration
 
-Central configuration for communication between
-the AI Agent Platform controller and the execution worker.
+Central configuration for communication between the AI Agent Platform
+controller and the execution worker, including large-task execution.
 """
 
 import os
@@ -10,44 +10,27 @@ import os
 from dotenv import load_dotenv
 
 
-# Load local .env configuration when present.
 load_dotenv()
 
+WORKER_HOST = os.getenv("WORKER_HOST", "127.0.0.1")
+WORKER_PORT = int(os.getenv("WORKER_PORT", "8001"))
 
-# Worker connection
-# The controller runs on the laptop; the worker runs on the PC.
-WORKER_HOST = os.getenv(
-    "WORKER_HOST",
-    "127.0.0.1"
-)
+# Controller -> worker request timeout.
+WORKER_TIMEOUT = int(os.getenv("WORKER_TIMEOUT", "300"))
 
-WORKER_PORT = int(
-    os.getenv(
-        "WORKER_PORT",
-        "8001"
-    )
-)
+# Large tasks may require several model calls.
+LARGE_TASK_TIMEOUT = int(os.getenv("LARGE_TASK_TIMEOUT", "1800"))
 
+# Prompt length is never rejected by the API. This threshold only selects
+# the multi-step execution path; Ollama/model context limits remain the
+# final feasibility boundary.
+LARGE_TASK_THRESHOLD = int(os.getenv("LARGE_TASK_THRESHOLD", "12000"))
 
-# Request timeout
-WORKER_TIMEOUT = int(
-    os.getenv(
-        "WORKER_TIMEOUT",
-        "300"
-    )
-)
+# Keep the number of generated execution steps bounded and predictable.
+MAX_PLAN_STEPS = int(os.getenv("MAX_PLAN_STEPS", "12"))
 
+# Per-step result included in the next model context.
+STEP_CONTEXT_CHARS = int(os.getenv("STEP_CONTEXT_CHARS", "12000"))
 
-# Ollama model
-DEFAULT_MODEL = os.getenv(
-    "DEFAULT_MODEL",
-    "qwen2.5-coder:7b"
-)
-
-
-# Ollama endpoint
-# Ollama is accessed by the worker locally on the PC.
-OLLAMA_HOST = os.getenv(
-    "OLLAMA_HOST",
-    "http://127.0.0.1:11434"
-)
+DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "qwen2.5-coder:7b")
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
