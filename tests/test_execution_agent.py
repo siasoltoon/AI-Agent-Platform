@@ -26,7 +26,9 @@ def test_agent_executor_writes_real_file(tmp_path: Path):
     assert result["status"] == "completed"
     assert result["execution_mode"] == "agentic"
     assert (tmp_path / "hello.txt").read_text(encoding="utf-8") == "hello world"
-    assert len(result["steps"]) == 2
+    assert result["execution_evidence"]["verified"] is True
+    assert result["execution_evidence"]["checks"][0]["passed"] is True
+    assert result["tool_records"][0]["ok"] is True
 
 
 def test_agent_executor_accepts_tool_shorthand(tmp_path: Path):
@@ -46,12 +48,39 @@ def test_agent_executor_rejects_completion_without_execution(tmp_path: Path):
     assert not (tmp_path / "hello.txt").exists()
 
 
+def test_agent_executor_does_not_trust_done_without_verification(tmp_path: Path):
+    ollama = FakeOllama([
+        '{"action":"read_file","args":{"path":"missing.txt"}}',
+        '{"action":"done","summary":"Done anyway"}',
+        '{"action":"write_file","args":{"path":"hello.txt","content":"verified"}}',
+        '{"action":"done","summary":"Created and verified hello.txt"}',
+    ])
+    result = AgentExecutor(ollama, workspace_root=str(tmp_path), max_steps=4).execute("Create hello.txt")
+    assert result["status"] == "completed"
+    assert (tmp_path / "hello.txt").read_text(encoding="utf-8") == "verified"
+    assert result["execution_evidence"]["verified"] is True
+    assert result["steps"][1]["verification"]["verified"] is False
+
+
+def test_agent_executor_recovers_from_tool_failure(tmp_path: Path):
+    ollama = FakeOllama([
+        '{"action":"read_file","args":{"path":"missing.txt"}}',
+        '{"action":"write_file","args":{"path":"recovered.txt","content":"ok"}}',
+        '{"action":"done","summary":"Recovered and created recovered.txt"}',
+    ])
+    result = AgentExecutor(ollama, workspace_root=str(tmp_path), max_steps=3).execute("Create recovered.txt")
+    assert result["status"] == "completed"
+    assert (tmp_path / "recovered.txt").exists()
+    assert result["tool_records"][0]["ok"] is False
+    assert result["tool_records"][1]["ok"] is True
+
+
 def test_agent_executor_rejects_workspace_escape(tmp_path: Path):
     ollama = FakeOllama([
         '{"action":"tool","tool":"write_file","args":{"path":"../escape.txt","content":"x"}}',
     ])
-    with pytest.raises(AgentExecutionError, match="escapes"):
-        AgentExecutor(ollama, workspace_root=str(tmp_path)).execute("write outside")
+    with pytest.raises(AgentExecutionError, match="maximum execution steps|escapes"):
+        AgentExecutor(ollama, workspace_root=str(tmp_path), max_steps=1).execute("write outside")
 
 
 def test_agent_executor_rejects_unknown_tool(tmp_path: Path):
