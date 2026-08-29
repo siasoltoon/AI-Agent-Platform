@@ -17,3 +17,25 @@ A modular local AI agent platform for managing tasks, tools, workspaces and auto
 The controller uses the canonical Task Contract and routes `agent.execute` tasks to the real agentic execution path. Tasks are persisted in SQLite so lifecycle state survives backend restarts, and the backend exposes liveness/readiness probes for deployment health checks.
 
 The agent is considered complete only after real tool execution and observable verification evidence. It does not treat model-generated suggested code as task completion.
+
+## Production configuration
+
+Copy `.env.example` to `.env` and set deployment-specific values. The API supports explicit `ENVIRONMENT`, `API_HOST`, `API_PORT`, `CORS_ORIGINS` and `LOG_LEVEL` settings. Wildcard CORS is rejected by configuration validation so production deployments must declare their trusted browser origins.
+
+The current architecture keeps heavy agent execution on the configured PC worker. The controller remains responsible for task contracts, routing, persistence and health endpoints.
+
+## Health endpoints
+
+- `GET /health/live` — process liveness.
+- `GET /health/ready` — durable task-store readiness.
+- `GET /` — backward-compatible service status.
+
+## Validation
+
+Run the full test suite before deployment:
+
+```text
+python -m pytest -q
+```
+
+Also compile the production execution modules with `python -m py_compile` as documented in `docs/FINAL_PRODUCTION_AUDIT.md`.
