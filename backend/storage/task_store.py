@@ -110,6 +110,34 @@ class TaskStore:
             rows = connection.execute("SELECT * FROM task_events WHERE task_id = ? ORDER BY id ASC LIMIT ?", (task_id, limit)).fetchall()
             return [self._decode_event(row) for row in rows]
 
+    def summary(self, *, recent_limit: int = 20) -> dict[str, Any]:
+        """Return bounded operational aggregates for the control plane."""
+        recent_limit = max(1, min(int(recent_limit), 100))
+        with self._lock, self._connect() as connection:
+            rows = connection.execute("SELECT status, COUNT(*) AS count FROM tasks GROUP BY status").fetchall()
+            counts = {str(row["status"]): int(row["count"]) for row in rows}
+            total = sum(counts.values())
+            duration = connection.execute(
+                "SELECT AVG(completed_at - started_at) AS avg_duration FROM tasks WHERE status='completed' AND started_at IS NOT NULL AND completed_at IS NOT NULL"
+            ).fetchone()["avg_duration"]
+            event_count = int(connection.execute("SELECT COUNT(*) FROM task_events").fetchone()[0])
+            recent = connection.execute(
+                "SELECT * FROM task_events ORDER BY id DESC LIMIT ?", (recent_limit,)
+            ).fetchall()
+            return {
+                "counts": {
+                    "total": total,
+                    "queued": counts.get("queued", 0),
+                    "running": counts.get("running", 0),
+                    "completed": counts.get("completed", 0),
+                    "failed": counts.get("failed", 0),
+                    "cancelled": counts.get("cancelled", 0),
+                },
+                "average_execution_seconds": float(duration) if duration is not None else None,
+                "event_count": event_count,
+                "recent_events": [self._decode_event(row) for row in recent],
+            }
+
     def update(self, task_id: str, **changes: Any) -> dict[str, Any]:
         allowed = {"status", "started_at", "completed_at", "result", "error", "metadata"}
         unknown = set(changes) - allowed
@@ -175,13 +203,7 @@ class TaskStore:
                 "UPDATE tasks SET status='queued', started_at=NULL, completed_at=NULL, result_json=NULL, error=NULL, metadata_json=? WHERE id=? AND status='failed'",
                 (json.dumps(metadata, ensure_ascii=False, default=str), task_id),
             )
-            self._record_event(
-                connection,
-                task_id,
-                "manual_retry_queued",
-                status="queued",
-                detail={"previous_error": previous_error, "manual_retry_count": metadata["manual_retry_count"]},
-            )
+            self._record_event(connection, task_id, "manual_retry_queued", status="queued", detail={"previous_error": previous_error, "manual_retry_count": metadata["manual_retry_count"]})
             connection.commit()
             return self._decode(connection.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone())
 
