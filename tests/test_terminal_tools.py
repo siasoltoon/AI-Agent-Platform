@@ -9,6 +9,26 @@ def test_terminal_allows_python_version():
     assert result["timed_out"] is False
 
 
+def test_terminal_allows_windows_type():
+    result = TerminalTool().execute("type NUL", timeout=10)
+    assert result["code"] == 0
+
+
+def test_terminal_allows_directory_inspection():
+    result = TerminalTool().execute("dir", timeout=10)
+    assert result["code"] == 0
+
+
+def test_terminal_allows_git_status():
+    result = TerminalTool().execute("git status --short", timeout=10)
+    assert result["code"] == 0
+
+
+def test_terminal_allows_node_toolchain_command():
+    result = TerminalTool().execute("node --version", timeout=10)
+    assert result["code"] == 0
+
+
 def test_terminal_rejects_shell_chaining():
     with pytest.raises(PermissionError, match="blocked operation"):
         TerminalTool().execute("python --version & echo unsafe")
