@@ -84,7 +84,7 @@ class TaskStore:
                 "INSERT INTO tasks (id,prompt,model,status,created_at,started_at,completed_at,result_json,error,metadata_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (task["id"], task["prompt"], task.get("model"), status, task["created_at"], task.get("started_at"), task.get("completed_at"), json.dumps(task.get("result"), ensure_ascii=False, default=str), task.get("error"), json.dumps(task.get("metadata", {}), ensure_ascii=False, default=str)),
             )
-            self._record_event(connection, task["id"], "created", status=status, detail={"prompt_length": len(task["prompt"]})
+            self._record_event(connection, task["id"], "created", status=status, detail={"prompt_length": len(task["prompt"])})
             connection.commit()
 
     def get(self, task_id: str) -> dict[str, Any] | None:
