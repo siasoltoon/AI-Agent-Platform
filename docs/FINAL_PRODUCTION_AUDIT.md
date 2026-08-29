@@ -16,13 +16,17 @@ This audit covers the production execution path currently implemented on `featur
 - Duplicate task IDs are rejected.
 - Failed and timed-out executions are persisted as failed tasks.
 - Liveness and readiness probes are exposed by the backend.
-- The test suite includes contract, router, runtime-bound, worker-contract, execution-agent, terminal-tool, storage and production-health coverage.
+- API deployment configuration now validates environment, port, log level and explicit CORS origins.
+- Wildcard CORS is rejected by the production configuration layer.
+- The repository contains a deployment baseline covering network exposure, durable persistence, supervision and health checks.
+- The test suite includes contract, router, runtime-bound, worker-contract, execution-agent, terminal-tool, storage, production-health and production-configuration coverage.
 
 ## Operational validation
 
 Run:
 
 ```text
+python -m py_compile config\production_config.py
 python -m py_compile agent_core\execution_agent.py
 python -m py_compile agent_core\runtime.py
 python -m py_compile task_engine\contracts.py
@@ -37,6 +41,6 @@ python -m pytest -q
 
 The production completion criterion is **real execution + observable verification evidence**, not model-generated proposed code.
 
-## Remaining deployment responsibility
+## Deployment boundary
 
-The application code is production-hardened for the current local PC-worker architecture. Before public deployment, operators must provide their deployment-specific secrets, firewall rules, TLS termination, allowed CORS origins, process supervision, backups and monitoring. Those are environment/deployment concerns rather than reasons to weaken the execution contract.
+Application-level production hardening is implemented. Deployment operators still must provide deployment-specific secrets, TLS termination, firewall rules, process supervision, durable backups and monitoring. These requirements are documented in `docs/PRODUCTION_DEPLOYMENT_BASELINE.md`.
