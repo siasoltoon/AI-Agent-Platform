@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -69,13 +70,8 @@ class TaskStore:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    task["id"],
-                    task["prompt"],
-                    task.get("model"),
-                    str(task["status"]),
-                    task["created_at"],
-                    task.get("started_at"),
-                    task.get("completed_at"),
+                    task["id"], task["prompt"], task.get("model"), str(task["status"]),
+                    task["created_at"], task.get("started_at"), task.get("completed_at"),
                     json.dumps(task.get("result"), ensure_ascii=False, default=str),
                     task.get("error"),
                     json.dumps(task.get("metadata", {}), ensure_ascii=False, default=str),
@@ -94,14 +90,7 @@ class TaskStore:
             return [self._decode(row) for row in rows]
 
     def update(self, task_id: str, **changes: Any) -> dict[str, Any]:
-        allowed = {
-            "status",
-            "started_at",
-            "completed_at",
-            "result",
-            "error",
-            "metadata",
-        }
+        allowed = {"status", "started_at", "completed_at", "result", "error", "metadata"}
         unknown = set(changes) - allowed
         if unknown:
             raise ValueError(f"Unsupported task fields: {sorted(unknown)}")
@@ -122,15 +111,40 @@ class TaskStore:
         values.append(task_id)
 
         with self._lock, self._connect() as connection:
-            cursor = connection.execute(
-                f"UPDATE tasks SET {', '.join(assignments)} WHERE id = ?",
-                values,
-            )
+            cursor = connection.execute(f"UPDATE tasks SET {', '.join(assignments)} WHERE id = ?", values)
             if cursor.rowcount != 1:
                 raise KeyError(task_id)
             connection.commit()
             row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
             return self._decode(row)
+
+    def recover_running_tasks(self) -> int:
+        """Requeue tasks left running by a controller process that stopped."""
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE tasks SET status = 'queued', started_at = NULL WHERE status = 'running'"
+            )
+            connection.commit()
+            return cursor.rowcount
+
+    def claim_next_queued(self) -> dict[str, Any] | None:
+        """Atomically claim the oldest queued task for the local executor."""
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM tasks WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1"
+            ).fetchone()
+            if row is None:
+                connection.commit()
+                return None
+            started_at = time.time()
+            connection.execute(
+                "UPDATE tasks SET status = 'running', started_at = ? WHERE id = ?",
+                (started_at, row["id"]),
+            )
+            connection.commit()
+            updated = connection.execute("SELECT * FROM tasks WHERE id = ?", (row["id"],)).fetchone()
+            return self._decode(updated)
 
     def ping(self) -> bool:
         with self._lock, self._connect() as connection:
