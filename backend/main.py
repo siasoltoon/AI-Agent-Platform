@@ -13,9 +13,9 @@ from fastapi.responses import FileResponse
 
 from backend.api import agents
 from backend.api import tasks
+from backend.api import workers
 from backend.task_runner import DEFAULT_POLL_SECONDS, TaskRunner
 from config.production_config import CONFIG
-
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DASHBOARD_DIR = BASE_DIR / "dashboard"
@@ -39,7 +39,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=list(CONFIG.cors_origins),
@@ -48,9 +47,9 @@ app.add_middleware(
     allow_headers=["Content-Type", "Authorization"],
 )
 
-
 app.include_router(tasks.router)
 app.include_router(agents.router)
+app.include_router(workers.router)
 
 
 @app.get("/")

@@ -1,9 +1,9 @@
-# Frontend
+# Dashboard Frontend Source
 
-Frontend application placeholder.
+This directory contains the extensible React source architecture for the AI Agent Platform dashboard.
 
-Will connect to Backend API for:
-- Tasks
-- Agent state
-- Logs
-- Execution progress
+The controller's currently served production surface is the dependency-light `/dashboard` application. The React source is kept aligned as the component-oriented evolution path and can be bundled with Vite when the deployment contract requires a separate frontend artifact.
+
+Current package scripts: `npm run dev`, `npm run build`.
+
+Do not add fake API data to make UI states look complete. Components must consume backend contracts and explicitly represent unavailable capabilities.
