@@ -1,0 +1,1 @@
+Dashboard task-list endpoint compatibility marker. The API exposes GET /tasks/ for the Vite dashboard.
