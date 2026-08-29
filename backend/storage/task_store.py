@@ -1,4 +1,4 @@
-"""Small durable SQLite task store for the controller API."""
+"""Durable SQLite task store with lifecycle enforcement and audit events."""
 
 from __future__ import annotations
 
@@ -9,9 +9,11 @@ import time
 from pathlib import Path
 from typing import Any
 
+from task_engine.lifecycle import validate_transition
+
 
 class TaskStore:
-    """Persist task lifecycle state without requiring an external database."""
+    """Persist task lifecycle state and an append-only execution audit trail."""
 
     def __init__(self, path: str | Path = "data/tasks.db") -> None:
         self.path = Path(path)
@@ -27,8 +29,7 @@ class TaskStore:
 
     def _initialize(self) -> None:
         with self._lock, self._connect() as connection:
-            connection.execute(
-                """
+            connection.execute("""
                 CREATE TABLE IF NOT EXISTS tasks (
                     id TEXT PRIMARY KEY,
                     prompt TEXT NOT NULL,
@@ -41,42 +42,52 @@ class TaskStore:
                     error TEXT,
                     metadata_json TEXT NOT NULL
                 )
-                """
-            )
+            """)
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS task_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    event_type TEXT NOT NULL,
+                    status TEXT,
+                    detail_json TEXT,
+                    FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+                )
+            """)
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_task_events_task_id ON task_events(task_id, id)")
             connection.commit()
 
     @staticmethod
     def _decode(row: sqlite3.Row) -> dict[str, Any]:
         return {
-            "id": row["id"],
-            "prompt": row["prompt"],
-            "model": row["model"],
-            "status": row["status"],
-            "created_at": row["created_at"],
-            "started_at": row["started_at"],
-            "completed_at": row["completed_at"],
+            "id": row["id"], "prompt": row["prompt"], "model": row["model"], "status": row["status"],
+            "created_at": row["created_at"], "started_at": row["started_at"], "completed_at": row["completed_at"],
             "result": json.loads(row["result_json"]) if row["result_json"] else None,
-            "error": row["error"],
-            "metadata": json.loads(row["metadata_json"]),
+            "error": row["error"], "metadata": json.loads(row["metadata_json"]),
         }
 
+    @staticmethod
+    def _decode_event(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": row["id"], "task_id": row["task_id"], "created_at": row["created_at"],
+            "event_type": row["event_type"], "status": row["status"],
+            "detail": json.loads(row["detail_json"]) if row["detail_json"] else None,
+        }
+
+    def _record_event(self, connection: sqlite3.Connection, task_id: str, event_type: str, *, status: str | None = None, detail: Any = None) -> None:
+        connection.execute(
+            "INSERT INTO task_events (task_id, created_at, event_type, status, detail_json) VALUES (?, ?, ?, ?, ?)",
+            (task_id, time.time(), event_type, status, json.dumps(detail, ensure_ascii=False, default=str) if detail is not None else None),
+        )
+
     def create(self, task: dict[str, Any]) -> None:
+        status = str(task["status"])
         with self._lock, self._connect() as connection:
             connection.execute(
-                """
-                INSERT INTO tasks
-                (id, prompt, model, status, created_at, started_at, completed_at,
-                 result_json, error, metadata_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    task["id"], task["prompt"], task.get("model"), str(task["status"]),
-                    task["created_at"], task.get("started_at"), task.get("completed_at"),
-                    json.dumps(task.get("result"), ensure_ascii=False, default=str),
-                    task.get("error"),
-                    json.dumps(task.get("metadata", {}), ensure_ascii=False, default=str),
-                ),
+                "INSERT INTO tasks (id,prompt,model,status,created_at,started_at,completed_at,result_json,error,metadata_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (task["id"], task["prompt"], task.get("model"), status, task["created_at"], task.get("started_at"), task.get("completed_at"), json.dumps(task.get("result"), ensure_ascii=False, default=str), task.get("error"), json.dumps(task.get("metadata", {}), ensure_ascii=False, default=str)),
             )
+            self._record_event(connection, task["id"], "created", status=status, detail={"prompt_length": len(task["prompt"])})
             connection.commit()
 
     def get(self, task_id: str) -> dict[str, Any] | None:
@@ -84,10 +95,20 @@ class TaskStore:
             row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
             return self._decode(row) if row else None
 
-    def list(self) -> list[dict[str, Any]]:
+    def list(self, *, limit: int = 100, status: str | None = None) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 500))
         with self._lock, self._connect() as connection:
-            rows = connection.execute("SELECT * FROM tasks ORDER BY created_at DESC").fetchall()
+            if status:
+                rows = connection.execute("SELECT * FROM tasks WHERE status = ? ORDER BY created_at DESC LIMIT ?", (str(status).strip().lower(), limit)).fetchall()
+            else:
+                rows = connection.execute("SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
             return [self._decode(row) for row in rows]
+
+    def events(self, task_id: str, *, limit: int = 200) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 1000))
+        with self._lock, self._connect() as connection:
+            rows = connection.execute("SELECT * FROM task_events WHERE task_id = ? ORDER BY id ASC LIMIT ?", (task_id, limit)).fetchall()
+            return [self._decode_event(row) for row in rows]
 
     def update(self, task_id: str, **changes: Any) -> dict[str, Any]:
         allowed = {"status", "started_at", "completed_at", "result", "error", "metadata"}
@@ -96,55 +117,69 @@ class TaskStore:
             raise ValueError(f"Unsupported task fields: {sorted(unknown)}")
         if not changes:
             current = self.get(task_id)
-            if current is None:
-                raise KeyError(task_id)
+            if current is None: raise KeyError(task_id)
             return current
 
-        assignments: list[str] = []
-        values: list[Any] = []
-        for key, value in changes.items():
-            column = {"result": "result_json", "metadata": "metadata_json"}.get(key, key)
-            assignments.append(f"{column} = ?")
-            if key in {"result", "metadata"}:
-                value = json.dumps(value, ensure_ascii=False, default=str)
-            values.append(str(value) if key == "status" else value)
-        values.append(task_id)
-
         with self._lock, self._connect() as connection:
-            cursor = connection.execute(f"UPDATE tasks SET {', '.join(assignments)} WHERE id = ?", values)
-            if cursor.rowcount != 1:
-                raise KeyError(task_id)
-            connection.commit()
             row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
-            return self._decode(row)
+            if row is None: raise KeyError(task_id)
+            current_status = str(row["status"])
+            target_status = str(changes.get("status", current_status)).strip().lower()
+            if "status" in changes: validate_transition(current_status, target_status)
+            assignments, values, detail = [], [], {}
+            for key, value in changes.items():
+                column = {"result": "result_json", "metadata": "metadata_json"}.get(key, key)
+                assignments.append(f"{column} = ?")
+                if key in {"result", "metadata"}: value = json.dumps(value, ensure_ascii=False, default=str)
+                values.append(str(value) if key == "status" else value)
+                if key not in {"result", "metadata"}: detail[key] = value
+            values.append(task_id)
+            connection.execute(f"UPDATE tasks SET {', '.join(assignments)} WHERE id = ?", values)
+            event_type = "status_changed" if "status" in changes and target_status != current_status else "updated"
+            self._record_event(connection, task_id, event_type, status=target_status, detail=detail)
+            connection.commit()
+            return self._decode(connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone())
+
+    def cancel(self, task_id: str, *, reason: str = "Cancelled by user.") -> dict[str, Any]:
+        with self._lock, self._connect() as connection:
+            row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if row is None: raise KeyError(task_id)
+            status = str(row["status"])
+            if status in {"completed", "failed", "cancelled"}: return self._decode(row)
+            validate_transition(status, "cancelled")
+            completed_at = time.time()
+            connection.execute("UPDATE tasks SET status='cancelled', completed_at=?, error=? WHERE id=?", (completed_at, reason, task_id))
+            self._record_event(connection, task_id, "cancelled", status="cancelled", detail={"reason": reason})
+            connection.commit()
+            return self._decode(connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone())
 
     def recover_running_tasks(self) -> int:
-        """Requeue tasks left running by a controller process that stopped."""
         with self._lock, self._connect() as connection:
-            cursor = connection.execute(
-                "UPDATE tasks SET status = 'queued', started_at = NULL WHERE status = 'running'"
-            )
+            rows = connection.execute("SELECT id FROM tasks WHERE status='running'").fetchall()
+            for row in rows:
+                connection.execute("UPDATE tasks SET status='queued', started_at=NULL WHERE id=?", (row["id"],))
+                self._record_event(connection, row["id"], "recovered", status="queued", detail={"reason": "controller_restart"})
             connection.commit()
-            return cursor.rowcount
+            return len(rows)
 
     def claim_next_queued(self) -> dict[str, Any] | None:
-        """Atomically claim the oldest queued task for the local executor."""
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT * FROM tasks WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1"
-            ).fetchone()
+            row = connection.execute("SELECT * FROM tasks WHERE status='queued' ORDER BY created_at ASC LIMIT 1").fetchone()
             if row is None:
-                connection.commit()
-                return None
+                connection.commit(); return None
             started_at = time.time()
-            connection.execute(
-                "UPDATE tasks SET status = 'running', started_at = ? WHERE id = ?",
-                (started_at, row["id"]),
-            )
+            cursor = connection.execute("UPDATE tasks SET status='running', started_at=? WHERE id=? AND status='queued'", (started_at, row["id"]))
+            if cursor.rowcount != 1:
+                connection.rollback(); return None
+            self._record_event(connection, row["id"], "claimed", status="running", detail={"started_at": started_at})
             connection.commit()
-            updated = connection.execute("SELECT * FROM tasks WHERE id = ?", (row["id"],)).fetchone()
-            return self._decode(updated)
+            return self._decode(connection.execute("SELECT * FROM tasks WHERE id=?", (row["id"],)).fetchone())
+
+    def is_cancelled(self, task_id: str) -> bool:
+        with self._lock, self._connect() as connection:
+            row = connection.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
+            return bool(row and row["status"] == "cancelled")
 
     def ping(self) -> bool:
         with self._lock, self._connect() as connection:
