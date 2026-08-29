@@ -18,9 +18,8 @@ WORKER_TIMEOUT = int(os.getenv("WORKER_TIMEOUT", "300"))
 LARGE_TASK_TIMEOUT = int(os.getenv("LARGE_TASK_TIMEOUT", "1800"))
 LARGE_TASK_THRESHOLD = int(os.getenv("LARGE_TASK_THRESHOLD", "12000"))
 MAX_PLAN_STEPS = int(os.getenv("MAX_PLAN_STEPS", "12"))
+MAX_STEP_RETRIES = int(os.getenv("MAX_STEP_RETRIES", "1"))
 STEP_CONTEXT_CHARS = int(os.getenv("STEP_CONTEXT_CHARS", "12000"))
-
-# Mission context cap used before planning/execution prompts are built.
 MISSION_CONTEXT_CHARS = int(os.getenv("MISSION_CONTEXT_CHARS", "28000"))
 MISSION_CHUNK_CHARS = int(os.getenv("MISSION_CHUNK_CHARS", "16000"))
 
