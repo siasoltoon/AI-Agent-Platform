@@ -1,3 +1,4 @@
+import React from "react";
 import { getWorkers } from "../api/workers";
 
 export default function WorkerStatus() {
