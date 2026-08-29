@@ -9,17 +9,8 @@ from typing import Any
 
 from backend.services.ollama_service import OllamaService
 from tool_system.file_tools import (
-    CopyFileTool,
-    DeleteFileTool,
-    DirectoryExistsTool,
-    FileExistsTool,
-    FileHashTool,
-    ListDirectoryTool,
-    MakeDirectoryTool,
-    MoveFileTool,
-    ReadFileTool,
-    SearchFilesTool,
-    WriteFileTool,
+    CopyFileTool, DeleteFileTool, DirectoryExistsTool, FileExistsTool, FileHashTool,
+    ListDirectoryTool, MakeDirectoryTool, MoveFileTool, ReadFileTool, SearchFilesTool, WriteFileTool,
 )
 from tool_system.terminal_tools import TerminalTool
 
@@ -37,29 +28,25 @@ class AgentExecutor:
     }
     _TERMINAL_ALIASES = {
         "type", "cat", "dir", "ls", "pwd", "where", "findstr", "fc", "tree", "more", "echo",
-        "mkdir", "mktemp", "whoami", "hostname", "ver", "date", "time",
-        "python", "py", "pytest", "pip", "pip3", "git", "uvicorn", "ruff", "black", "mypy",
-        "node", "npm", "npm.cmd", "npx", "vite", "yarn", "pnpm", "dotnet", "java", "javac",
-        "go", "cargo", "rustc", "pytest.exe", "python.exe", "node.exe", "npm.exe", "git.exe",
+        "mkdir", "mktemp", "whoami", "hostname", "ver", "date", "time", "python", "py", "pytest",
+        "pip", "pip3", "git", "uvicorn", "ruff", "black", "mypy", "node", "npm", "npm.cmd", "npx",
+        "vite", "yarn", "pnpm", "dotnet", "java", "javac", "go", "cargo", "rustc", "pytest.exe",
+        "python.exe", "node.exe", "npm.exe", "git.exe",
     }
     _TOOLS = _WORKSPACE_TOOLS | {"terminal"}
+    _MUTATING_TOOLS = {"write_file", "make_directory", "copy_file", "move_file", "delete_file"}
 
     def __init__(self, ollama: OllamaService, workspace_root: str | None = None, max_steps: int = 32, max_output_chars: int = 12000) -> None:
         self.ollama = ollama
         self.workspace = Path(workspace_root or Path.cwd()).resolve()
         self.max_steps = max(1, min(int(max_steps), 64))
         self.max_output_chars = max(256, int(max_output_chars))
-        self.read_file = ReadFileTool()
-        self.write_file = WriteFileTool()
-        self.file_exists = FileExistsTool()
-        self.directory_exists = DirectoryExistsTool()
-        self.list_directory = ListDirectoryTool()
-        self.make_directory = MakeDirectoryTool()
+        self.read_file, self.write_file = ReadFileTool(), WriteFileTool()
+        self.file_exists, self.directory_exists = FileExistsTool(), DirectoryExistsTool()
+        self.list_directory, self.make_directory = ListDirectoryTool(), MakeDirectoryTool()
         self.search_files = SearchFilesTool()
-        self.copy_file = CopyFileTool()
-        self.move_file = MoveFileTool()
-        self.delete_file = DeleteFileTool()
-        self.file_hash = FileHashTool()
+        self.copy_file, self.move_file = CopyFileTool(), MoveFileTool()
+        self.delete_file, self.file_hash = DeleteFileTool(), FileHashTool()
         self.terminal = TerminalTool()
 
     def _safe_path(self, path: str) -> Path:
@@ -77,9 +64,7 @@ class AgentExecutor:
     @staticmethod
     def _extract_json(text: str) -> dict[str, Any]:
         text = str(text or "").strip()
-        candidates = [text]
-        candidates.extend(re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL | re.IGNORECASE))
-        for candidate in candidates:
+        for candidate in [text, *re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL | re.IGNORECASE)]:
             try:
                 value = json.loads(candidate)
                 if isinstance(value, dict):
@@ -104,7 +89,7 @@ class AgentExecutor:
             return {**decision, "action": "tool", "tool": tool or action}
         if action in cls._TERMINAL_ALIASES:
             return {**decision, "action": "tool", "tool": action}
-        if tool in cls._TERMINAL_ALIASES or tool in cls._WORKSPACE_TOOLS:
+        if tool in cls._TOOLS or tool in cls._TERMINAL_ALIASES:
             return {**decision, "action": "tool", "tool": tool}
         return decision
 
@@ -134,8 +119,7 @@ class AgentExecutor:
                 raise AgentExecutionError("fc requires path and compare/path2.")
             return f'fc {quoted} "{self._safe_path(other)}"'
         if name == "echo":
-            text = str(self._arg(args, "text", "message", "content", default=""))
-            return f"echo {text}".strip()
+            return f"echo {self._arg(args, 'text', 'message', 'content', default='')}".strip()
         command = str(self._arg(args, "command", "cmd", default=name)).strip()
         return command if command.split()[0].lower() == name.lower() else f"{name} {command}".strip()
 
@@ -149,8 +133,7 @@ class AgentExecutor:
         if name == "write_file":
             path = self._safe_path(self._arg(args, "path", "file_path", "filepath"))
             content = str(self._arg(args, "content", "text", "body"))
-            result = self.write_file.execute(str(path), content)
-            return {**result, "path": self._relative(path)}
+            return {**self.write_file.execute(str(path), content), "path": self._relative(path)}
         if name == "file_exists":
             path = self._safe_path(self._arg(args, "path", "file_path", "filepath"))
             return {**self.file_exists.execute(str(path)), "path": self._relative(path), "ok": True}
@@ -164,9 +147,7 @@ class AgentExecutor:
             return {"ok": True, **result}
         if name == "make_directory":
             path = self._safe_path(self._arg(args, "path", "directory"))
-            result = self.make_directory.execute(str(path))
-            result["path"] = self._relative(path)
-            return result
+            result = self.make_directory.execute(str(path)); result["path"] = self._relative(path); return result
         if name == "search_files":
             path = self._safe_path(self._arg(args, "path", "directory", default="."))
             result = self.search_files.execute(str(path), str(self._arg(args, "pattern", default="*")))
@@ -176,21 +157,14 @@ class AgentExecutor:
         if name in {"copy_file", "move_file"}:
             source = self._safe_path(self._arg(args, "source", "src", "path"))
             destination = self._safe_path(self._arg(args, "destination", "dest", "target", "path2"))
-            tool = self.copy_file if name == "copy_file" else self.move_file
-            result = tool.execute(str(source), str(destination))
-            result["source"] = self._relative(source)
-            result["destination"] = self._relative(destination)
-            return result
+            result = (self.copy_file if name == "copy_file" else self.move_file).execute(str(source), str(destination))
+            result["source"], result["destination"] = self._relative(source), self._relative(destination); return result
         if name == "delete_file":
             path = self._safe_path(self._arg(args, "path", "file_path", "filepath"))
-            result = self.delete_file.execute(str(path))
-            result["path"] = self._relative(path)
-            return result
+            result = self.delete_file.execute(str(path)); result["path"] = self._relative(path); return result
         if name == "file_hash":
             path = self._safe_path(self._arg(args, "path", "file_path", "filepath"))
-            result = self.file_hash.execute(str(path), str(args.get("algorithm", "sha256")))
-            result["path"] = self._relative(path)
-            return result
+            result = self.file_hash.execute(str(path), str(args.get("algorithm", "sha256"))); result["path"] = self._relative(path); return result
         command = str(self._arg(args, "command", "cmd", default="")).strip() if name == "terminal" else self._alias_command(name, args)
         if not command:
             raise AgentExecutionError("Terminal command cannot be empty.")
@@ -206,102 +180,78 @@ class AgentExecutor:
         writes = [r for r in successful if r.get("tool") == "write_file"]
         reads = [r for r in successful if r.get("tool") == "read_file"]
         for record in writes:
-            result = record.get("result", {})
-            rel = result.get("path")
-            expected = result.get("content")
-            if not rel:
-                continue
-            path = self._safe_path(rel)
-            exists = path.is_file()
+            result = record.get("result", {}); rel = result.get("path"); expected = result.get("content")
+            if not rel: continue
+            path = self._safe_path(rel); exists = path.is_file()
             checks.append({"type": "file_exists", "path": rel, "passed": exists})
             if exists and isinstance(expected, str):
-                actual = path.read_text(encoding="utf-8")
-                checks.append({"type": "file_content_matches_write", "path": rel, "passed": actual == expected})
+                checks.append({"type": "file_content_matches_write", "path": rel, "passed": path.read_text(encoding="utf-8") == expected})
         for record in reads:
-            result = record.get("result", {})
-            rel = result.get("path")
-            if not rel:
-                continue
-            path = self._safe_path(rel)
-            checks.append({"type": "read_verified_exists", "path": rel, "passed": path.is_file()})
-        terminals = [r for r in successful if r.get("tool") in {"terminal", *self._TERMINAL_ALIASES}]
-        for record in terminals:
-            result = record.get("result", {})
-            checks.append({"type": "terminal_success", "command": result.get("command"), "passed": result.get("code") == 0})
+            rel = record.get("result", {}).get("path")
+            if rel: checks.append({"type": "read_verified_exists", "path": rel, "passed": self._safe_path(rel).is_file()})
+        for record in successful:
+            tool, result = record.get("tool"), record.get("result", {})
+            if tool == "make_directory":
+                rel = result.get("path")
+                if rel: checks.append({"type": "directory_exists", "path": rel, "passed": self._safe_path(rel).is_dir()})
+            elif tool == "copy_file":
+                rel = result.get("destination")
+                if rel: checks.append({"type": "copied_file_exists", "path": rel, "passed": self._safe_path(rel).is_file()})
+            elif tool == "move_file":
+                src, dst = result.get("source"), result.get("destination")
+                if src and dst: checks.extend([
+                    {"type": "move_destination_exists", "path": dst, "passed": self._safe_path(dst).exists()},
+                    {"type": "move_source_absent", "path": src, "passed": not self._safe_path(src).exists()},
+                ])
+            elif tool == "delete_file":
+                rel = result.get("path")
+                if rel: checks.append({"type": "file_absent_after_delete", "path": rel, "passed": not self._safe_path(rel).exists()})
+        for record in successful:
+            if record.get("tool") in {"terminal", *self._TERMINAL_ALIASES}:
+                result = record.get("result", {})
+                checks.append({"type": "terminal_success", "command": result.get("command"), "passed": result.get("code") == 0})
 
-        task_lower = task.lower()
-        mutating = any(word in task_lower for word in ("create", "write", "make", "generate", "save", "build", "modify", "update", "delete", "remove"))
-        verification_requested = any(word in task_lower for word in ("verify", "check", "confirm", "ensure", "exactly", "read"))
-        if failed:
+        lower = task.lower()
+        mutating = bool(successful and any(r.get("tool") in self._MUTATING_TOOLS for r in successful))
+        verification_requested = any(word in lower for word in ("verify", "check", "confirm", "ensure", "exactly", "read"))
+        required = [c for c in checks if c["type"] not in {"terminal_success"}]
+        verified = bool(successful) and not failed and (all(c["passed"] for c in required) if required else True)
+        if writes and verification_requested and not reads:
             verified = False
-        elif writes:
-            file_checks = [c for c in checks if c["type"] in {"file_exists", "file_content_matches_write"}]
-            verified = bool(file_checks) and all(c["passed"] for c in file_checks)
-            if verification_requested and not reads:
-                verified = False
-        elif terminals:
-            verified = all(c["passed"] for c in checks if c["type"] == "terminal_success")
-        else:
-            verified = bool(successful) and not mutating
-        return {
-            "verified": verified,
-            "checks": checks,
-            "successful_tool_actions": len(successful),
-            "failed_tool_actions": len(failed),
-        }
+        if mutating and not required:
+            verified = False
+        return {"verified": verified, "checks": checks, "successful_tool_actions": len(successful), "failed_tool_actions": len(failed)}
 
     def execute(self, task: str) -> dict[str, Any]:
-        if not task or not task.strip():
-            raise AgentExecutionError("Task cannot be empty.")
+        if not task or not task.strip(): raise AgentExecutionError("Task cannot be empty.")
         system = """You are the production autonomous coding agent.
 Return exactly one JSON object per turn:
 {"action":"tool","tool":"TOOL_NAME","args":{...}} or {"action":"done","summary":"..."}
 
 Workspace tools: read_file, write_file, file_exists, directory_exists, list_directory, make_directory, search_files, copy_file, move_file, delete_file, file_hash.
-Execution tool: terminal.
-Terminal aliases: type, cat, dir, ls, pwd, where, findstr, fc, tree, more, echo, mkdir, mktemp, whoami, hostname, ver, date, time, python, py, pytest, pip, pip3, git, uvicorn, ruff, black, mypy, node, npm, npm.cmd, npx, vite, yarn, pnpm, dotnet, java, javac, go, cargo, rustc.
+Execution tool: terminal. Terminal aliases include type, cat, dir, ls, pwd, where, findstr, fc, tree, more, echo, mkdir, python, py, pytest, pip, git, uvicorn, ruff, black, mypy, node, npm, npx, vite, yarn, pnpm, dotnet, java, javac, go, cargo, rustc.
 
-Rules:
-- Work only inside the configured workspace.
-- Inspect before changing when useful.
-- Prefer dedicated workspace tools for file operations.
-- After every write/delete/move/copy operation, perform an observable verification action before done.
-- For requested file content, read the file and compare the exact content.
-- Never claim completion based only on your own text.
-- If an action fails, recover when possible; otherwise return a failed result through the tool record.
-- Only return done after the observable execution evidence supports completion.
-"""
+Rules: stay inside workspace; inspect before risky changes; prefer dedicated tools; after every mutation perform observable verification; for requested content read it and verify exact equality; never claim completion without evidence; recover from transient failures when possible; return done only when evidence supports success."""
         conversation = f"{system}\n\nTASK:\n{task.strip()}\n\nWORKSPACE:\n{self.workspace}"
-        actions: list[dict[str, Any]] = []
-        records: list[dict[str, Any]] = []
+        actions: list[dict[str, Any]] = []; records: list[dict[str, Any]] = []
         for step in range(1, self.max_steps + 1):
             response = self.ollama.generate(conversation, timeout=self.ollama.timeout)
             decision = self._normalize_decision(self._extract_json(response.get("response", "")))
             actions.append({"step": step, "decision": decision})
             if decision.get("action") == "done":
-                evidence = self._verify_evidence(task, records)
-                actions[-1]["verification"] = evidence
+                evidence = self._verify_evidence(task, records); actions[-1]["verification"] = evidence
                 if records and evidence["verified"]:
-                    return {"status": "completed", "execution_mode": "agentic", "summary": str(decision.get("summary", "Task completed.")), "steps": actions, "execution_evidence": evidence, "tool_records": records}
-                conversation += "\n\nVERIFICATION FAILED. Do not finish yet. Perform the missing observable verification action(s), then re-check the result."
+                    return {"status":"completed","execution_mode":"agentic","summary":str(decision.get("summary","Task completed.")),"steps":actions,"execution_evidence":evidence,"tool_records":records}
+                conversation += "\n\nVERIFICATION FAILED. Continue with observable verification; do not claim success yet."
                 continue
-            if decision.get("action") != "tool":
-                raise AgentExecutionError("Invalid agent action.")
-            tool = str(decision.get("tool", "")).strip().lower()
-            args = decision.get("args", {})
-            if tool not in self._TOOLS and tool not in self._TERMINAL_ALIASES:
-                raise AgentExecutionError(f"Unknown tool: {tool}")
-            if not isinstance(args, dict):
-                raise AgentExecutionError("Tool args must be an object.")
-            try:
-                result = self._tool(tool, args)
-                record = {"step": step, "tool": tool, "ok": True, "result": result}
-            except Exception as exc:
-                record = {"step": step, "tool": tool, "ok": False, "error_type": type(exc).__name__, "error": str(exc)}
-                result = {"ok": False, "error_type": type(exc).__name__, "error": str(exc)}
+            if decision.get("action") != "tool": raise AgentExecutionError("Invalid agent action.")
+            tool = str(decision.get("tool", "")).strip().lower(); args = decision.get("args", {})
+            if tool not in self._TOOLS and tool not in self._TERMINAL_ALIASES: raise AgentExecutionError(f"Unknown tool: {tool}")
+            if not isinstance(args, dict): raise AgentExecutionError("Tool args must be an object.")
+            try: result = self._tool(tool, args); record = {"step":step,"tool":tool,"ok":True,"result":result}
+            except Exception as exc: record = {"step":step,"tool":tool,"ok":False,"error_type":type(exc).__name__,"error":str(exc)}; result={"ok":False,"error_type":type(exc).__name__,"error":str(exc)}
             records.append(record)
             serialized = json.dumps(result, ensure_ascii=False, default=str)
-            if len(serialized) > self.max_output_chars:
-                serialized = serialized[: self.max_output_chars] + "...<truncated>"
+            if len(serialized) > self.max_output_chars: serialized = serialized[:self.max_output_chars] + "...<truncated>"
             conversation += f"\n\nOBSERVATION step {step}: tool={tool}\n{serialized}\n\nContinue, recover, or verify before done."
         raise AgentExecutionError(f"Agent exceeded maximum execution steps ({self.max_steps}).")
