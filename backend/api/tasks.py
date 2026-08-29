@@ -30,10 +30,7 @@ def _execute_agent_task(task: TaskRequest, *, task_id: str) -> dict:
     )
 
 
-command_registry.register(
-    "agent.execute",
-    _execute_agent_task,
-)
+command_registry.register("agent.execute", _execute_agent_task)
 
 
 @router.post("/create", response_model=TaskResponse)
@@ -42,6 +39,19 @@ async def create_task(task: TaskRequest) -> TaskResponse:
     task_id = task.task_id or str(uuid.uuid4())
     if task_id in TASK_STORE:
         raise HTTPException(status_code=409, detail="Task ID already exists.")
+
+    try:
+        command = task_router.command_for(task)
+        command_registry.resolve(command)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "task_id": task_id,
+                "message": "Invalid task command.",
+                "error": str(exc),
+            },
+        ) from exc
 
     now = time.time()
     TASK_STORE[task_id] = {
@@ -57,7 +67,7 @@ async def create_task(task: TaskRequest) -> TaskResponse:
         "metadata": {
             **task.metadata,
             "prompt_length": len(task.prompt),
-            "command": task_router.command_for(task),
+            "command": command,
         },
     }
 
@@ -82,19 +92,6 @@ async def create_task(task: TaskRequest) -> TaskResponse:
             })
 
         return TaskResponse(**TASK_STORE[task_id])
-
-    except (KeyError, ValueError) as exc:
-        TASK_STORE[task_id]["status"] = TaskStatus.FAILED
-        TASK_STORE[task_id]["completed_at"] = time.time()
-        TASK_STORE[task_id]["error"] = str(exc)
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "task_id": task_id,
-                "message": "Invalid task command.",
-                "error": str(exc),
-            },
-        ) from exc
 
     except Exception as exc:
         TASK_STORE[task_id]["status"] = TaskStatus.FAILED
