@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from backend.api import agents
+from backend.api import dashboard
 from backend.api import tasks
 from backend.api import workers
 from backend.task_runner import DEFAULT_POLL_SECONDS, TaskRunner
@@ -50,6 +51,7 @@ app.add_middleware(
 app.include_router(tasks.router)
 app.include_router(agents.router)
 app.include_router(workers.router)
+app.include_router(dashboard.router)
 
 
 @app.get("/")
@@ -96,7 +98,7 @@ async def readiness() -> dict:
 
 
 @app.get("/dashboard", include_in_schema=False)
-async def dashboard():
+async def dashboard_page():
     index_file = DASHBOARD_DIR / "index.html"
     if not index_file.exists():
         return {"status": "error", "message": "Dashboard index.html not found."}
