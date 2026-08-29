@@ -6,8 +6,9 @@ import json
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from task_engine.lifecycle import validate_transition
 
@@ -20,12 +21,17 @@ class TaskStore:
         self._lock = threading.RLock()
         self._initialize()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """Open one SQLite connection and always release its OS file handle."""
         if self.path.parent != Path("."):
             self.path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self.path, timeout=10)
         connection.row_factory = sqlite3.Row
-        return connection
+        try:
+            yield connection
+        finally:
+            connection.close()
 
     def _initialize(self) -> None:
         with self._lock, self._connect() as connection:
@@ -142,9 +148,7 @@ class TaskStore:
             current_status = str(row["status"])
             target_status = str(changes.get("status", current_status)).strip().lower()
             if "status" in changes:
-                # running -> queued is a legitimate lifecycle transition only
-                # for crash/controller recovery. Keep it out of the generic
-                # update API so callers cannot silently requeue a live task.
+                # running -> queued is reserved for controller recovery.
                 if current_status == "running" and target_status == "queued":
                     raise ValueError(f"Invalid task lifecycle transition: {current_status} -> {target_status}")
                 validate_transition(current_status, target_status)
@@ -173,7 +177,7 @@ class TaskStore:
             connection.execute("UPDATE tasks SET status='cancelled', completed_at=?, error=? WHERE id=?", (completed_at, reason, task_id))
             self._record_event(connection, task_id, "cancelled", status="cancelled", detail={"reason": reason})
             connection.commit()
-            return self._decode(connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone())
+            return self._decode(connection.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone())
 
     def recover_running_tasks(self) -> int:
         with self._lock, self._connect() as connection:
