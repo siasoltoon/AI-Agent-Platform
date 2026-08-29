@@ -1,21 +1,14 @@
-"""
-Task API
+"""Task API backed by the canonical Task Contract v1."""
 
-Handles:
-- Creating tasks
-- Retrieving tasks
-- Listing tasks
-- Executing tasks through Agent Runtime
-"""
+from __future__ import annotations
 
 import time
 import uuid
-from typing import Optional
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
 
 from agent_core.runtime import AgentRuntime
+from task_engine.contracts import TaskRequest, TaskResponse, TaskStatus
 
 
 router = APIRouter(
@@ -25,68 +18,51 @@ router = APIRouter(
 
 
 runtime = AgentRuntime()
+TASK_STORE: dict[str, dict] = {}
 
 
-TASK_STORE = {}
+@router.post("/create", response_model=TaskResponse)
+async def create_task(task: TaskRequest) -> TaskResponse:
+    """Create and execute a task through the Agent Runtime."""
 
-
-class TaskCreate(BaseModel):
-    prompt: str = Field(
-        ...,
-        min_length=1,
-        description="Task instruction.",
-    )
-
-    model: Optional[str] = Field(
-        default=None,
-        description="Ollama model to use.",
-    )
-
-
-@router.post("/create")
-async def create_task(
-    task: TaskCreate,
-):
-    """
-    Create and execute a task through the Agent Runtime.
-    """
-
-    task_id = str(uuid.uuid4())
-
-    selected_model = task.model
+    task_id = task.task_id or str(uuid.uuid4())
+    now = time.time()
 
     TASK_STORE[task_id] = {
         "id": task_id,
         "prompt": task.prompt,
-        "model": selected_model,
-        "status": "queued",
-        "created_at": time.time(),
+        "model": task.model,
+        "status": TaskStatus.QUEUED,
+        "created_at": now,
         "started_at": None,
         "completed_at": None,
         "result": None,
         "error": None,
+        "metadata": {
+            **task.metadata,
+            "prompt_length": len(task.prompt),
+        },
     }
 
-    TASK_STORE[task_id]["status"] = "running"
+    TASK_STORE[task_id]["status"] = TaskStatus.RUNNING
     TASK_STORE[task_id]["started_at"] = time.time()
 
     try:
-
         result = runtime.execute(
             prompt=task.prompt,
-            model=selected_model,
+            model=task.model,
             task_id=task_id,
+            timeout_seconds=task.timeout_seconds,
         )
 
-        TASK_STORE[task_id]["status"] = "completed"
+        TASK_STORE[task_id]["status"] = TaskStatus.COMPLETED
         TASK_STORE[task_id]["completed_at"] = time.time()
         TASK_STORE[task_id]["result"] = result
 
-        return TASK_STORE[task_id]
+        return TaskResponse(**TASK_STORE[task_id])
 
     except Exception as exc:
-
-        TASK_STORE[task_id]["status"] = "failed"
+        TASK_STORE[task_id]["status"] = TaskStatus.FAILED
         TASK_STORE[task_id]["completed_at"] = time.time()
         TASK_STORE[task_id]["error"] = str(exc)
 
@@ -100,33 +76,19 @@ async def create_task(
         ) from exc
 
 
-@router.get("/{task_id}")
-async def get_task(
-    task_id: str,
-):
-    """
-    Return a task by ID.
-    """
+@router.get("/{task_id}", response_model=TaskResponse)
+async def get_task(task_id: str) -> TaskResponse:
+    """Return a task by ID."""
 
     task = TASK_STORE.get(task_id)
-
     if not task:
-        raise HTTPException(
-            status_code=404,
-            detail="Task not found.",
-        )
+        raise HTTPException(status_code=404, detail="Task not found.")
 
-    return task
+    return TaskResponse(**task)
 
 
-@router.get("")
-async def list_tasks():
-    """
-    Return all tasks.
-    """
+@router.get("", response_model=dict)
+async def list_tasks() -> dict:
+    """Return all tasks."""
 
-    return {
-        "tasks": list(
-            TASK_STORE.values()
-        )
-    }
+    return {"tasks": list(TASK_STORE.values())}
