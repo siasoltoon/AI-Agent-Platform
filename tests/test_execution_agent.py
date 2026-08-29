@@ -2,7 +2,9 @@
 
 from pathlib import Path
 
-from agent_core.execution_agent import AgentExecutor
+import pytest
+
+from agent_core.execution_agent import AgentExecutionError, AgentExecutor
 
 
 class FakeOllama:
@@ -24,6 +26,7 @@ def test_agent_executor_writes_real_file(tmp_path: Path):
     assert result["status"] == "completed"
     assert result["execution_mode"] == "agentic"
     assert (tmp_path / "hello.txt").read_text(encoding="utf-8") == "hello world"
+    assert len(result["steps"]) == 2
 
 
 def test_agent_executor_accepts_tool_shorthand(tmp_path: Path):
@@ -36,46 +39,37 @@ def test_agent_executor_accepts_tool_shorthand(tmp_path: Path):
     assert (tmp_path / "hello.txt").read_text(encoding="utf-8") == "hello world"
 
 
+def test_agent_executor_rejects_completion_without_execution(tmp_path: Path):
+    ollama = FakeOllama(['{"action":"done","summary":"Pretended to finish"}'])
+    with pytest.raises(AgentExecutionError, match="without executing"):
+        AgentExecutor(ollama, workspace_root=str(tmp_path)).execute("Create hello.txt")
+    assert not (tmp_path / "hello.txt").exists()
+
+
 def test_agent_executor_rejects_workspace_escape(tmp_path: Path):
     ollama = FakeOllama([
         '{"action":"tool","tool":"write_file","args":{"path":"../escape.txt","content":"x"}}',
     ])
-    try:
+    with pytest.raises(AgentExecutionError, match="escapes"):
         AgentExecutor(ollama, workspace_root=str(tmp_path)).execute("write outside")
-    except Exception as exc:
-        assert "escapes" in str(exc).lower()
-    else:
-        raise AssertionError("workspace escape was not rejected")
 
 
 def test_agent_executor_rejects_unknown_tool(tmp_path: Path):
     ollama = FakeOllama([
         '{"action":"tool","tool":"delete_everything","args":{}}',
     ])
-    try:
+    with pytest.raises(AgentExecutionError, match="Unknown tool"):
         AgentExecutor(ollama, workspace_root=str(tmp_path)).execute("do something")
-    except Exception as exc:
-        assert "unknown tool" in str(exc).lower()
-    else:
-        raise AssertionError("unknown tool was not rejected")
 
 
 def test_agent_executor_requires_bounded_completion(tmp_path: Path):
     ollama = FakeOllama(['{"action":"tool","tool":"read_file","args":{"path":"missing.txt"}}'] * 3)
     executor = AgentExecutor(ollama, workspace_root=str(tmp_path), max_steps=3)
-    try:
+    with pytest.raises(Exception, match="maximum execution steps|No such file"):
         executor.execute("keep going")
-    except Exception as exc:
-        assert "maximum execution steps" in str(exc).lower() or "no such file" in str(exc).lower()
-    else:
-        raise AssertionError("unbounded agent loop did not fail")
 
 
 def test_agent_executor_rejects_empty_task(tmp_path: Path):
     ollama = FakeOllama([])
-    try:
+    with pytest.raises(AgentExecutionError, match="Task cannot be empty"):
         AgentExecutor(ollama, workspace_root=str(tmp_path)).execute("   ")
-    except Exception as exc:
-        assert "task cannot be empty" in str(exc).lower()
-    else:
-        raise AssertionError("empty task was not rejected")
