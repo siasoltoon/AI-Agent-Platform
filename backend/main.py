@@ -86,3 +86,45 @@ async def dashboard():
     return FileResponse(
         index_file
     )
+
+
+@app.get(
+    "/dashboard/style.css",
+    include_in_schema=False,
+)
+async def dashboard_css():
+
+    css_file = DASHBOARD_DIR / "style.css"
+
+    if not css_file.exists():
+
+        return {
+            "status": "error",
+            "message": "Dashboard style.css not found.",
+        }
+
+    return FileResponse(
+        css_file,
+        media_type="text/css",
+    )
+
+
+@app.get(
+    "/dashboard/app.js",
+    include_in_schema=False,
+)
+async def dashboard_js():
+
+    js_file = DASHBOARD_DIR / "app.js"
+
+    if not js_file.exists():
+
+        return {
+            "status": "error",
+            "message": "Dashboard app.js not found.",
+        }
+
+    return FileResponse(
+        js_file,
+        media_type="application/javascript",
+    )
