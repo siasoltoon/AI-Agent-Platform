@@ -157,6 +157,34 @@ class TaskStore:
             connection.commit()
             return self._decode(connection.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone())
 
+    def retry_failed(self, task_id: str) -> dict[str, Any]:
+        """Explicitly requeue a failed task without weakening generic lifecycle updates."""
+        with self._lock, self._connect() as connection:
+            row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            if str(row["status"]) != "failed":
+                raise ValueError(f"Task is not retryable: {row['status']}")
+
+            metadata = json.loads(row["metadata_json"])
+            previous_error = row["error"]
+            metadata["manual_retry_count"] = int(metadata.get("manual_retry_count", 0)) + 1
+            metadata["retry_count"] = 0
+            metadata["last_retry_at"] = time.time()
+            connection.execute(
+                "UPDATE tasks SET status='queued', started_at=NULL, completed_at=NULL, result_json=NULL, error=NULL, metadata_json=? WHERE id=? AND status='failed'",
+                (json.dumps(metadata, ensure_ascii=False, default=str), task_id),
+            )
+            self._record_event(
+                connection,
+                task_id,
+                "manual_retry_queued",
+                status="queued",
+                detail={"previous_error": previous_error, "manual_retry_count": metadata["manual_retry_count"]},
+            )
+            connection.commit()
+            return self._decode(connection.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone())
+
     def cancel(self, task_id: str, *, reason: str = "Cancelled by user.") -> dict[str, Any]:
         with self._lock, self._connect() as connection:
             row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
