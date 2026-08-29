@@ -34,7 +34,10 @@ def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
 
 
 def _cors_origins() -> tuple[str, ...]:
-    raw = os.getenv("CORS_ORIGINS", "http://127.0.0.1:3000,http://localhost:3000")
+    raw = os.getenv(
+        "CORS_ORIGINS",
+        "http://127.0.0.1:3000,http://localhost:3000,http://127.0.0.1:5173,http://localhost:5173",
+    )
     origins = tuple(item.strip() for item in raw.split(",") if item.strip())
     if not origins:
         raise ValueError("CORS_ORIGINS must contain at least one origin.")
