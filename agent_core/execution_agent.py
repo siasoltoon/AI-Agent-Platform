@@ -31,7 +31,7 @@ class AgentExecutor:
         self.ollama = ollama
         self.workspace = Path(workspace_root or Path.cwd()).resolve()
         self.max_steps = max(1, max_steps)
-        self.max_output_chars = max_output_chars
+        self.max_output_chars = max(256, max_output_chars)
         self.read_file = ReadFileTool()
         self.write_file = WriteFileTool()
         self.terminal = TerminalTool()
@@ -73,17 +73,7 @@ class AgentExecutor:
 
     @staticmethod
     def _normalize_decision(decision: dict[str, Any]) -> dict[str, Any]:
-        """Normalize supported tool shorthands into the canonical action contract.
-
-        Accepted tool forms include both::
-
-            {"action": "tool", "tool": "write_file", "args": {...}}
-            {"action": "write_file", "args": {...}}
-            {"action": "write_file", "tool": "write_file", "args": {...}}
-
-        The latter two are common outputs from small local coding models.  The
-        executor must still route them through the same validated tool path.
-        """
+        """Normalize supported tool shorthands into the canonical action contract."""
         action = decision.get("action")
         tool = decision.get("tool")
 
@@ -108,7 +98,10 @@ class AgentExecutor:
             command = str(args.get("command", "")).strip()
             if not command:
                 raise AgentExecutionError("Terminal command cannot be empty.")
-            result = self.terminal.execute(command)
+            timeout = int(args.get("timeout", 120))
+            if timeout < 1 or timeout > 600:
+                raise AgentExecutionError("Terminal timeout must be between 1 and 600 seconds.")
+            result = self.terminal.execute(command, timeout=timeout)
             return {**result, "command": command}
         raise AgentExecutionError(f"Unknown tool: {name}")
 
@@ -129,10 +122,12 @@ Rules:
 - Use terminal only for safe project commands such as tests, compilation, formatting, or inspection.
 - After changes, run appropriate validation/tests and fix failures.
 - Never claim completion unless the requested work was actually performed.
+- You MUST execute at least one tool action before returning done.
 - Keep actions small and observable.
 """
         conversation = f"{system}\n\nTASK:\n{task}\n\nWORKSPACE:\n{self.workspace}"
         actions: list[dict[str, Any]] = []
+        tool_actions = 0
 
         for step in range(1, self.max_steps + 1):
             response = self.ollama.generate(conversation, timeout=self.ollama.timeout)
@@ -142,6 +137,8 @@ Rules:
             actions.append({"step": step, "decision": decision})
 
             if action == "done":
+                if tool_actions == 0:
+                    raise AgentExecutionError("Agent claimed completion without executing a tool action.")
                 return {
                     "status": "completed",
                     "execution_mode": "agentic",
@@ -160,6 +157,7 @@ Rules:
                 raise AgentExecutionError("Tool args must be an object.")
 
             result = self._tool(tool, args)
+            tool_actions += 1
             serialized = json.dumps(result, ensure_ascii=False, default=str)
             if len(serialized) > self.max_output_chars:
                 serialized = serialized[: self.max_output_chars] + "...<truncated>"
