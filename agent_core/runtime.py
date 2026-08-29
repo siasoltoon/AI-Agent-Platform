@@ -1,25 +1,19 @@
-"""
-Agent Runtime
+"""Agent runtime boundary for real PC-worker execution.
 
-Coordinates task execution between the Agent Core, Task Engine and PC Worker.
-Large missions automatically use a multi-step planner/executor/finalizer path.
+Large missions stay on the same real agentic execution path as normal tasks.
+The runtime only selects safe execution limits; it never turns a coding task
+into text-only planning calls that bypass the worker's evidence contract.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from agent_core.large_task import LargeTaskOrchestrator
 from backend.services.worker_client import WorkerClient
 from config.worker_config import (
     DEFAULT_MODEL,
     LARGE_TASK_THRESHOLD,
     LARGE_TASK_TIMEOUT,
-    MAX_PLAN_STEPS,
-    MAX_STEP_RETRIES,
-    MISSION_CHUNK_CHARS,
-    MISSION_CONTEXT_CHARS,
-    STEP_CONTEXT_CHARS,
     WORKER_HOST,
     WORKER_PORT,
     WORKER_TIMEOUT,
@@ -27,6 +21,8 @@ from config.worker_config import (
 
 
 MAX_RUNTIME_TIMEOUT = 1800
+DEFAULT_LARGE_AGENT_STEPS = 32
+DEFAULT_NORMAL_AGENT_STEPS = 12
 
 
 class AgentRuntime:
@@ -37,27 +33,6 @@ class AgentRuntime:
         self.default_model = DEFAULT_MODEL
         self.large_task_threshold = LARGE_TASK_THRESHOLD
 
-    def _generate(
-        self,
-        prompt: str,
-        model: str,
-        timeout: int,
-        task_id: str | None,
-        phase: str,
-        metadata: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        response = self.worker_client.execute_task(
-            {
-                "task_id": task_id,
-                "prompt": prompt,
-                "model": model,
-                "timeout": timeout,
-                "metadata": {"phase": phase, **(metadata or {})},
-            },
-            timeout=timeout,
-        )
-        return {"response": response.get("result", ""), "raw": response}
-
     @staticmethod
     def _bounded_timeout(value: int, *, field: str = "timeout_seconds") -> int:
         if value < 1 or value > MAX_RUNTIME_TIMEOUT:
@@ -66,7 +41,7 @@ class AgentRuntime:
 
     @staticmethod
     def _validate_worker_result(response: dict[str, Any]) -> None:
-        """Reject false-positive worker responses before a task can be marked completed."""
+        """Reject false-positive worker responses before a task can be completed."""
         if not isinstance(response, dict):
             raise RuntimeError("Worker returned an invalid execution response without verified execution evidence.")
         if response.get("status") != "completed":
@@ -91,60 +66,53 @@ class AgentRuntime:
         timeout_seconds: int | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Execute a task through the real agentic PC-worker path."""
+        """Execute the task through the real agentic PC-worker path."""
         if not prompt or not prompt.strip():
             raise ValueError("Task prompt cannot be empty.")
 
         prompt = prompt.strip()
-        selected_model = model or self.default_model
+        selected_model = (model or self.default_model).strip()
+        if not selected_model:
+            raise ValueError("Model identifier cannot be empty.")
+
         is_large = len(prompt) >= self.large_task_threshold
-        default_timeout = self.large_task_timeout if is_large else self.timeout
         selected_timeout = self._bounded_timeout(
-            int(timeout_seconds) if timeout_seconds is not None else int(default_timeout)
+            int(timeout_seconds) if timeout_seconds is not None
+            else int(self.large_task_timeout if is_large else self.timeout)
         )
+
         execution_metadata = dict(metadata or {})
+        # Large missions need the full bounded agent budget, but still use one
+        # worker execution so tool calls, observations and evidence stay in one
+        # authoritative trace. Caller metadata may lower the budget, never raise it.
+        configured_steps = execution_metadata.get("max_agent_steps")
+        if configured_steps is None:
+            configured_steps = DEFAULT_LARGE_AGENT_STEPS if is_large else DEFAULT_NORMAL_AGENT_STEPS
+        try:
+            requested_steps = int(configured_steps)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("max_agent_steps must be an integer.") from exc
+        maximum = DEFAULT_LARGE_AGENT_STEPS if is_large else DEFAULT_NORMAL_AGENT_STEPS
+        if requested_steps < 1 or requested_steps > maximum:
+            raise ValueError(f"max_agent_steps must be between 1 and {maximum} for this execution profile.")
+        execution_metadata["max_agent_steps"] = requested_steps
+        execution_metadata["execution_profile"] = "large" if is_large else "normal"
 
-        if not is_large:
-            result = self.worker_client.execute_task(
-                {
-                    "task_id": task_id,
-                    "prompt": prompt,
-                    "model": selected_model,
-                    "timeout": selected_timeout,
-                    "metadata": execution_metadata,
-                },
-                timeout=selected_timeout,
-            )
-            self._validate_worker_result(result)
-            return {
-                "task_id": task_id,
-                "model": selected_model,
-                "execution_mode": "agentic",
-                "result": result,
-            }
+        payload = {
+            "task_id": task_id,
+            "prompt": prompt,
+            "model": selected_model,
+            "timeout": selected_timeout,
+            "metadata": execution_metadata,
+        }
+        result = self.worker_client.execute_task(payload, timeout=selected_timeout)
+        self._validate_worker_result(result)
 
-        orchestrator = LargeTaskOrchestrator(
-            generate=lambda p, timeout: self._generate(
-                p,
-                selected_model,
-                self._bounded_timeout(int(timeout), field="step_timeout"),
-                task_id,
-                "large_task",
-                execution_metadata,
-            ),
-            threshold=self.large_task_threshold,
-            max_steps=MAX_PLAN_STEPS,
-            max_retries=MAX_STEP_RETRIES,
-            context_chars=STEP_CONTEXT_CHARS,
-            mission_context_chars=MISSION_CONTEXT_CHARS,
-            mission_chunk_chars=MISSION_CHUNK_CHARS,
-        )
-        orchestration = orchestrator.execute(prompt=prompt, model=selected_model, timeout=selected_timeout)
         return {
             "task_id": task_id,
             "model": selected_model,
-            "execution_mode": "multi_step_agentic",
-            "result": orchestration,
+            "execution_mode": "agentic_large" if is_large else "agentic",
+            "result": result,
         }
 
     def health_check(self) -> dict[str, Any]:
