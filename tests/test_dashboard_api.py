@@ -28,7 +28,8 @@ def test_dashboard_summary_uses_real_task_state(monkeypatch, tmp_path: Path):
     assert payload["tasks"]["counts"]["total"] == 1
     assert payload["tasks"]["counts"]["queued"] == 1
     assert payload["tasks"]["counts"]["completed"] == 0
-    assert payload["tasks"]["event_count"] is None
+    assert payload["tasks"]["event_count"] == 1
+    assert payload["tasks"]["recent_events"][0]["event_type"] == "created"
     assert payload["agent"]["status"] == "ready"
     assert payload["workers"]["workers"] == []
 
