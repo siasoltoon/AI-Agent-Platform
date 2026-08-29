@@ -1,3 +1,5 @@
+import shutil
+
 import pytest
 
 from tool_system.terminal_tools import TerminalTool
@@ -24,6 +26,7 @@ def test_terminal_allows_git_status():
     assert result["code"] == 0
 
 
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed in this environment")
 def test_terminal_allows_node_toolchain_command():
     result = TerminalTool().execute("node --version", timeout=10)
     assert result["code"] == 0
