@@ -9,16 +9,36 @@ from fastapi import APIRouter, HTTPException
 
 from agent_core.runtime import AgentRuntime
 from task_engine.contracts import TaskRequest, TaskResponse, TaskStatus
+from task_engine.registry import CommandRegistry
+from task_engine.router import TaskRouter
 
 
 router = APIRouter(prefix="/tasks", tags=["Tasks"])
 runtime = AgentRuntime()
+command_registry = CommandRegistry()
+task_router = TaskRouter(command_registry)
 TASK_STORE: dict[str, dict] = {}
+
+
+def _execute_agent_task(task: TaskRequest, *, task_id: str) -> dict:
+    """Default command handler for the existing Agent Runtime path."""
+    return runtime.execute(
+        prompt=task.prompt,
+        model=task.model,
+        task_id=task_id,
+        timeout_seconds=task.timeout_seconds,
+    )
+
+
+command_registry.register(
+    "agent.execute",
+    _execute_agent_task,
+)
 
 
 @router.post("/create", response_model=TaskResponse)
 async def create_task(task: TaskRequest) -> TaskResponse:
-    """Create and execute a task through the Agent Runtime."""
+    """Create and execute a task through the command router."""
     task_id = task.task_id or str(uuid.uuid4())
     if task_id in TASK_STORE:
         raise HTTPException(status_code=409, detail="Task ID already exists.")
@@ -37,6 +57,7 @@ async def create_task(task: TaskRequest) -> TaskResponse:
         "metadata": {
             **task.metadata,
             "prompt_length": len(task.prompt),
+            "command": task_router.command_for(task),
         },
     }
 
@@ -44,12 +65,7 @@ async def create_task(task: TaskRequest) -> TaskResponse:
     TASK_STORE[task_id]["started_at"] = time.time()
 
     try:
-        result = runtime.execute(
-            prompt=task.prompt,
-            model=task.model,
-            task_id=task_id,
-            timeout_seconds=task.timeout_seconds,
-        )
+        result = task_router.route(task, task_id=task_id)
 
         TASK_STORE[task_id]["status"] = TaskStatus.COMPLETED
         TASK_STORE[task_id]["completed_at"] = time.time()
@@ -66,6 +82,19 @@ async def create_task(task: TaskRequest) -> TaskResponse:
             })
 
         return TaskResponse(**TASK_STORE[task_id])
+
+    except (KeyError, ValueError) as exc:
+        TASK_STORE[task_id]["status"] = TaskStatus.FAILED
+        TASK_STORE[task_id]["completed_at"] = time.time()
+        TASK_STORE[task_id]["error"] = str(exc)
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "task_id": task_id,
+                "message": "Invalid task command.",
+                "error": str(exc),
+            },
+        ) from exc
 
     except Exception as exc:
         TASK_STORE[task_id]["status"] = TaskStatus.FAILED
