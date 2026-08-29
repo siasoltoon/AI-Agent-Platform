@@ -8,7 +8,13 @@ from pathlib import Path
 from typing import Any
 
 from backend.services.ollama_service import OllamaService
-from tool_system.file_tools import ReadFileTool, WriteFileTool
+from tool_system.file_tools import (
+    DeleteFileTool,
+    FileExistsTool,
+    ListDirectoryTool,
+    ReadFileTool,
+    WriteFileTool,
+)
 from tool_system.terminal_tools import TerminalTool
 
 
@@ -19,7 +25,14 @@ class AgentExecutionError(RuntimeError):
 class AgentExecutor:
     """Execute coding tasks through a bounded plan/act/observe/verify loop."""
 
-    _TOOLS = {"read_file", "write_file", "terminal"}
+    _TOOLS = {
+        "read_file",
+        "write_file",
+        "file_exists",
+        "list_directory",
+        "delete_file",
+        "terminal",
+    }
     _TERMINAL_ALIASES = {
         "type", "cat", "dir", "ls", "pwd", "where", "findstr", "fc", "tree", "more", "echo",
         "python", "py", "pytest", "pip", "pip3", "git", "uvicorn", "ruff", "black", "mypy",
@@ -33,12 +46,15 @@ class AgentExecutor:
         self.max_output_chars = max(256, max_output_chars)
         self.read_file = ReadFileTool()
         self.write_file = WriteFileTool()
+        self.file_exists = FileExistsTool()
+        self.list_directory = ListDirectoryTool()
+        self.delete_file = DeleteFileTool()
         self.terminal = TerminalTool()
 
     def _safe_path(self, path: str) -> Path:
-        if not path.strip():
+        if not str(path).strip():
             raise AgentExecutionError("Path cannot be empty.")
-        candidate = (self.workspace / path).resolve()
+        candidate = (self.workspace / str(path)).resolve()
         if candidate != self.workspace and self.workspace not in candidate.parents:
             raise AgentExecutionError("Path escapes the configured workspace.")
         return candidate
@@ -116,9 +132,19 @@ class AgentExecutor:
         if name == "write_file":
             path = self._safe_path(str(self._arg(args, "path", "file_path", "filepath")))
             content = str(self._arg(args, "content", "text", "body"))
-            path.parent.mkdir(parents=True, exist_ok=True)
             self.write_file.execute(str(path), content)
             return {"ok": True, "path": str(path.relative_to(self.workspace)), "bytes": path.stat().st_size, "content": content}
+        if name == "file_exists":
+            path = self._safe_path(str(self._arg(args, "path", "file_path", "filepath")))
+            return {"ok": True, "path": str(path.relative_to(self.workspace)), "exists": self.file_exists.execute(str(path))["exists"]}
+        if name == "list_directory":
+            path = self._safe_path(str(self._arg(args, "path", "directory", default=".")))
+            result = self.list_directory.execute(str(path))
+            result["path"] = str(path.relative_to(self.workspace)) if path != self.workspace else "."
+            return {"ok": True, **result}
+        if name == "delete_file":
+            path = self._safe_path(str(self._arg(args, "path", "file_path", "filepath")))
+            return self.delete_file.execute(str(path))
 
         command = str(self._arg(args, "command", "cmd", default="")).strip() if name == "terminal" else self._alias_command(name, args)
         if not command:
@@ -169,8 +195,8 @@ class AgentExecutor:
         system = """You are an autonomous coding agent. Perform the requested task in the workspace.
 Return exactly one JSON object per turn:
 {"action":"tool","tool":"TOOL_NAME","args":{...}} or {"action":"done","summary":"..."}
-Available tools: read_file, write_file, terminal, type, cat, dir, ls, pwd, where, findstr, fc, tree, more, echo, python, py, pytest, pip, git, uvicorn, ruff, black, mypy, node, npm, npx, vite, yarn, pnpm, dotnet, java, javac, go, cargo, rustc.
-Use dedicated file tools for workspace file mutation and verification. Terminal aliases are controlled and safe. Inspect, act, observe, recover, validate, then finish. Never claim completion without observable evidence."""
+Available tools: read_file, write_file, file_exists, list_directory, delete_file, terminal, type, cat, dir, ls, pwd, where, findstr, fc, tree, more, echo, python, py, pytest, pip, git, uvicorn, ruff, black, mypy, node, npm, npx, vite, yarn, pnpm, dotnet, java, javac, go, cargo, rustc.
+Use dedicated workspace tools for file operations and verification. Keep all paths inside the configured workspace. Inspect, act, observe, recover, validate, then finish. Never claim completion without observable evidence."""
         conversation = f"{system}\n\nTASK:\n{task.strip()}\n\nWORKSPACE:\n{self.workspace}"
         actions: list[dict[str, Any]] = []
         tool_records: list[dict[str, Any]] = []
