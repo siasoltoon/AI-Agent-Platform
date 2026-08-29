@@ -35,8 +35,8 @@ def _execute_agent_task(task: TaskRequest, *, task_id: str) -> dict:
 command_registry.register("agent.execute", _execute_agent_task)
 
 
-@router.post("/create", response_model=TaskResponse)
-async def create_task(task: TaskRequest) -> TaskResponse:
+async def _create_task(task: TaskRequest) -> TaskResponse:
+    """Create, execute, persist, and return a real task result."""
     task_id = task.task_id or str(uuid.uuid4())
     if TASK_STORE.get(task_id) is not None:
         raise HTTPException(status_code=409, detail="Task ID already exists.")
@@ -95,7 +95,7 @@ async def create_task(task: TaskRequest) -> TaskResponse:
         return TaskResponse(**task_record)
     except TimeoutError as exc:
         error = str(exc) or "Task execution timed out."
-        task_record = TASK_STORE.update(
+        TASK_STORE.update(
             task_id,
             status=TaskStatus.FAILED.value,
             completed_at=time.time(),
@@ -106,7 +106,7 @@ async def create_task(task: TaskRequest) -> TaskResponse:
             detail={"task_id": task_id, "message": "Task execution timed out.", "error": error},
         ) from exc
     except Exception as exc:
-        task_record = TASK_STORE.update(
+        TASK_STORE.update(
             task_id,
             status=TaskStatus.FAILED.value,
             completed_at=time.time(),
@@ -116,6 +116,17 @@ async def create_task(task: TaskRequest) -> TaskResponse:
             status_code=502,
             detail={"task_id": task_id, "message": "Task execution failed.", "error": str(exc)},
         ) from exc
+
+
+# The web dashboard uses POST /tasks/. Keep /tasks/create as a compatibility alias.
+@router.post("/", response_model=TaskResponse)
+async def create_task(task: TaskRequest) -> TaskResponse:
+    return await _create_task(task)
+
+
+@router.post("/create", response_model=TaskResponse, include_in_schema=False)
+async def create_task_legacy(task: TaskRequest) -> TaskResponse:
+    return await _create_task(task)
 
 
 @router.get("/{task_id}", response_model=TaskResponse)
