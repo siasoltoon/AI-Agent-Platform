@@ -74,17 +74,41 @@ class AgentExecutor:
             decision = {**decision, "action": "tool", "tool": str(tool or action)}
         return decision
 
+    @staticmethod
+    def _arg(args: dict[str, Any], *names: str, default: Any = "") -> Any:
+        """Return the first non-empty value from common model argument aliases."""
+        for name in names:
+            value = args.get(name)
+            if value is not None and str(value).strip():
+                return value
+        return default
+
     def _tool(self, name: str, args: dict[str, Any]) -> Any:
         if name == "read_file":
-            path = self._safe_path(str(args.get("path", "")))
-            return self.read_file.execute(str(path))
+            raw_path = self._arg(args, "path", "file_path", "filepath")
+            path = self._safe_path(str(raw_path))
+            content = self.read_file.execute(str(path))
+            return {
+                "ok": True,
+                "path": str(path.relative_to(self.workspace)),
+                "content": content,
+            }
+
         if name == "write_file":
-            path = self._safe_path(str(args.get("path", "")))
+            raw_path = self._arg(args, "path", "file_path", "filepath")
+            path = self._safe_path(str(raw_path))
+            content = str(self._arg(args, "content", "text", "body"))
             path.parent.mkdir(parents=True, exist_ok=True)
-            self.write_file.execute(str(path), str(args.get("content", "")))
-            return {"ok": True, "path": str(path.relative_to(self.workspace)), "bytes": path.stat().st_size}
+            self.write_file.execute(str(path), content)
+            return {
+                "ok": True,
+                "path": str(path.relative_to(self.workspace)),
+                "bytes": path.stat().st_size,
+                "content": content,
+            }
+
         if name == "terminal":
-            command = str(args.get("command", "")).strip()
+            command = str(self._arg(args, "command", "cmd")) .strip()
             if not command:
                 raise AgentExecutionError("Terminal command cannot be empty.")
             timeout = int(args.get("timeout", 120))
@@ -92,26 +116,53 @@ class AgentExecutor:
                 raise AgentExecutionError("Terminal timeout must be between 1 and 600 seconds.")
             result = self.terminal.execute(command, timeout=timeout)
             return {**result, "command": command}
+
         raise AgentExecutionError(f"Unknown tool: {name}")
 
     def _verify_evidence(self, task: str, tool_records: list[dict[str, Any]]) -> dict[str, Any]:
         """Verify completion from observable execution evidence, never from the model's claim alone."""
         successful = [r for r in tool_records if r.get("ok")]
         writes = [r for r in successful if r.get("tool") == "write_file"]
+        reads = [r for r in successful if r.get("tool") == "read_file"]
         terminals = [r for r in successful if r.get("tool") == "terminal" and r.get("result", {}).get("code") == 0]
 
         checks: list[dict[str, Any]] = []
+        written_by_path: dict[str, str] = {}
+
         for record in writes:
-            rel = record.get("result", {}).get("path")
+            result = record.get("result", {})
+            rel = result.get("path")
+            content = result.get("content")
             if rel:
-                target = self._safe_path(rel)
-                checks.append({"type": "file_exists", "path": rel, "passed": target.is_file()})
+                target = self._safe_path(str(rel))
+                exists = target.is_file()
+                checks.append({"type": "file_exists", "path": rel, "passed": exists})
+                if exists and isinstance(content, str):
+                    written_by_path[str(rel)] = content
+
+        for record in reads:
+            result = record.get("result", {})
+            rel = result.get("path")
+            content = result.get("content")
+            if rel:
+                target = self._safe_path(str(rel))
+                exists = target.is_file()
+                checks.append({"type": "file_exists", "path": rel, "passed": exists})
+                if exists and str(rel) in written_by_path:
+                    expected = written_by_path[str(rel)]
+                    checks.append({
+                        "type": "file_content_matches_write",
+                        "path": rel,
+                        "passed": content == expected,
+                    })
+
         for record in terminals:
             checks.append({"type": "terminal_success", "command": record.get("result", {}).get("command"), "passed": True})
 
         task_lower = task.lower()
         if any(word in task_lower for word in ("create", "write", "make", "generate", "save", "build")):
-            passed = bool(writes) and all(c["passed"] for c in checks if c["type"] == "file_exists")
+            file_checks = [c for c in checks if c["type"] in ("file_exists", "file_content_matches_write")]
+            passed = bool(writes) and bool(file_checks) and all(c["passed"] for c in file_checks)
         elif any(word in task_lower for word in ("test", "pytest", "compile", "run")):
             passed = bool(terminals)
         else:
@@ -133,6 +184,8 @@ or
 Rules:
 - Inspect relevant existing files before changing them.
 - Make real changes with write_file; do not paste proposed code as the final answer.
+- For write_file use args.path and args.content. file_path is also accepted, but prefer path.
+- For read_file use args.path and read the file after writing when the task asks for verification.
 - Use terminal only for safe project commands such as tests, compilation, formatting, or inspection.
 - After changes, run appropriate validation/tests and fix failures.
 - Never claim completion unless the requested work was actually performed.
