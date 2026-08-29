@@ -99,9 +99,6 @@ class TaskStore:
     def list(self, *, limit: int = 100, status: str | None = None) -> list[dict[str, Any]]:
         limit = max(1, min(int(limit), 500))
         with self._lock, self._connect() as connection:
-            # Sort by most recent persisted activity rather than only created_at.
-            # This keeps recently updated tasks at the top even when creation
-            # timestamps are identical (common in deterministic/unit tests).
             base = """
                 SELECT tasks.*
                 FROM tasks
@@ -144,7 +141,13 @@ class TaskStore:
             if row is None: raise KeyError(task_id)
             current_status = str(row["status"])
             target_status = str(changes.get("status", current_status)).strip().lower()
-            if "status" in changes: validate_transition(current_status, target_status)
+            if "status" in changes:
+                # running -> queued is a legitimate lifecycle transition only
+                # for crash/controller recovery. Keep it out of the generic
+                # update API so callers cannot silently requeue a live task.
+                if current_status == "running" and target_status == "queued":
+                    raise ValueError(f"Invalid task lifecycle transition: {current_status} -> {target_status}")
+                validate_transition(current_status, target_status)
             assignments, values, detail = [], [], {}
             for key, value in changes.items():
                 column = {"result": "result_json", "metadata": "metadata_json"}.get(key, key)
