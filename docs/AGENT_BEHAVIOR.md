@@ -16,15 +16,19 @@ The agent can currently:
 - `done` is rejected until at least one real tool action has executed and observable evidence supports completion.
 - File paths are resolved inside the configured workspace and workspace escapes are rejected.
 - Terminal execution is bounded to a maximum 600-second command timeout.
-- Runtime task timeouts are bounded to 1–1800 seconds, including large-task execution.
+- Runtime and worker task timeouts are bounded to 1–1800 seconds, including large-task execution.
 - Terminal commands use an allowlist and reject shell chaining, redirection, and destructive shell operations.
-- Agent execution is bounded by `max_agent_steps` (default 12).
-- Task prompts are bounded to 200,000 characters by the canonical Task Contract.
+- Worker-side agent execution is bounded to a maximum of 32 agent steps; the default remains 12.
+- Task prompts are bounded to 200,000 characters by the canonical Task Contract and independently enforced by the worker boundary.
+- Model identifiers are bounded to 128 characters.
 - Caller-supplied task IDs are normalized and bounded to 128 characters.
-- Task metadata is bounded to 64 keys to prevent unbounded request growth.
+- Task metadata is bounded to 64 keys and 32,768 serialized characters.
 - Tool observations are returned to the model so it can inspect results, detect failures, and continue fixing the task.
 - Completion records include the executed decision history, tool records, and verification evidence rather than only model-generated text.
+- The worker refuses to report successful execution unless the agent result contains verified execution evidence.
 - Failed execution is recorded as a failed task with an explicit error before the API reports the failure.
 - Unknown task commands are rejected before execution through the command registry/router.
 
-A task is not considered completed merely because the model generated code or claimed completion. Completion requires actual tool execution by the worker and a valid completed execution record with observable verification evidence.
+## Production completion rule
+
+A task is not considered completed merely because the model generated code or claimed completion. Completion requires actual tool execution by the worker **and** a valid completed execution record with observable verification evidence. Contract limits are enforced both at the controller boundary and again at the worker boundary so direct worker calls cannot bypass the safety limits.
