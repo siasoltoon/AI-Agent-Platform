@@ -8,6 +8,12 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator
 
 
+MAX_PROMPT_CHARS = 200_000
+MAX_TASK_ID_CHARS = 128
+MAX_TIMEOUT_SECONDS = 1800
+MAX_METADATA_KEYS = 64
+
+
 class TaskStatus(str, Enum):
     QUEUED = "queued"
     RUNNING = "running"
@@ -22,7 +28,8 @@ class TaskRequest(BaseModel):
     prompt: str = Field(
         ...,
         min_length=1,
-        description="Task instruction. Large prompts are allowed; downstream model limits decide feasibility.",
+        max_length=MAX_PROMPT_CHARS,
+        description="Task instruction. Limited to a bounded size before execution.",
     )
     model: str | None = Field(
         default=None,
@@ -30,12 +37,14 @@ class TaskRequest(BaseModel):
     )
     task_id: str | None = Field(
         default=None,
+        max_length=MAX_TASK_ID_CHARS,
         description="Optional caller-supplied task identifier.",
     )
     timeout_seconds: int | None = Field(
         default=None,
         ge=1,
-        description="Optional execution timeout override.",
+        le=MAX_TIMEOUT_SECONDS,
+        description="Optional execution timeout override, capped at 30 minutes.",
     )
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -54,6 +63,21 @@ class TaskRequest(BaseModel):
             return None
         value = value.strip()
         return value or None
+
+    @field_validator("task_id")
+    @classmethod
+    def normalize_task_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
+    @field_validator("metadata")
+    @classmethod
+    def validate_metadata(cls, value: dict[str, Any]) -> dict[str, Any]:
+        if len(value) > MAX_METADATA_KEYS:
+            raise ValueError(f"Task metadata cannot contain more than {MAX_METADATA_KEYS} keys.")
+        return value
 
 
 class TaskResponse(BaseModel):
