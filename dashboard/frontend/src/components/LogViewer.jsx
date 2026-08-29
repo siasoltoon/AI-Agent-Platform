@@ -1,14 +1,8 @@
-import { connectWebsocket } from "../services/websocket";
-
 export default function LogViewer() {
-  function startLogs() {
-    connectWebsocket();
-  }
-
   return (
     <section>
       <h2>Live Logs</h2>
-      <button onClick={startLogs}>Connect Logs</button>
+      <p>Live log streaming is not configured yet.</p>
     </section>
   );
 }
