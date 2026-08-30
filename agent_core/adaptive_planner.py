@@ -1,0 +1,71 @@
+"""Adaptive planning primitives for large autonomous software missions."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+from agent_core.task_graph import GraphTask, TaskGraph
+from agent_core.verification import FailureClass, classify_failure
+
+
+@dataclass
+class PlanningContext:
+    objective: str
+    repository_summary: str = ""
+    constraints: list[str] = field(default_factory=list)
+    discovered_components: list[str] = field(default_factory=list)
+    known_failures: list[str] = field(default_factory=list)
+
+
+class AdaptivePlanner:
+    """Build and evolve a task graph from repository evidence rather than a fixed workflow."""
+
+    MAX_TASKS = 128
+
+    def build_graph(self, context: PlanningContext, proposed_tasks: list[dict[str, Any]]) -> TaskGraph:
+        if not context.objective.strip():
+            raise ValueError("Planning objective cannot be empty")
+        if not proposed_tasks:
+            raise ValueError("Planner requires at least one proposed task")
+        if len(proposed_tasks) > self.MAX_TASKS:
+            raise ValueError(f"Planner cannot create more than {self.MAX_TASKS} tasks")
+        tasks = []
+        for item in proposed_tasks:
+            task_id = str(item.get("task_id", "")).strip()
+            title = str(item.get("title", "")).strip()
+            objective = str(item.get("objective", "")).strip()
+            deps = {str(dep).strip() for dep in item.get("depends_on", []) if str(dep).strip()}
+            if not task_id or not title or not objective:
+                raise ValueError("Every planned task requires task_id, title, and objective")
+            tasks.append(GraphTask(task_id, title, objective, deps))
+        return TaskGraph(tasks)
+
+    def recovery_action(self, error: BaseException | str) -> str:
+        category = classify_failure(error)
+        return {
+            FailureClass.TRANSIENT: "retry_with_backoff",
+            FailureClass.TEST_FAILURE: "diagnose_and_repair",
+            FailureClass.VALIDATION: "inspect_contract_and_correct_input",
+            FailureClass.TOOL_FAILURE: "inspect_tool_and_retry_or_switch_tool",
+            FailureClass.ENVIRONMENT: "repair_environment_or_mark_blocked_with_evidence",
+            FailureClass.BLOCKING: "stop_and_report_evidence",
+            FailureClass.UNKNOWN: "inspect_failure_evidence_before_retry",
+        }[category]
+
+    def expand_after_failure(self, graph: TaskGraph, failed_task_id: str, error: BaseException | str) -> list[GraphTask]:
+        """Add bounded diagnostic/repair tasks without mutating completed dependencies."""
+        if failed_task_id not in graph.tasks:
+            raise KeyError(failed_task_id)
+        category = classify_failure(error)
+        if category in {FailureClass.BLOCKING, FailureClass.VALIDATION}:
+            return []
+        repair_id = f"{failed_task_id}:repair:{graph.tasks[failed_task_id].attempts + 1}"
+        diagnosis_id = f"{failed_task_id}:diagnose:{graph.tasks[failed_task_id].attempts + 1}"
+        if diagnosis_id in graph.tasks or repair_id in graph.tasks:
+            return []
+        diagnosis = GraphTask(diagnosis_id, "Diagnose failure", f"Inspect the failure evidence for task {failed_task_id}, identify the root cause, and determine the minimal repair.", set(graph.tasks[failed_task_id].depends_on))
+        repair = GraphTask(repair_id, "Repair root cause", f"Apply and verify the root-cause repair for task {failed_task_id} after diagnosis.", {diagnosis_id})
+        graph.tasks[diagnosis_id] = diagnosis
+        graph.tasks[repair_id] = repair
+        return [diagnosis, repair]
