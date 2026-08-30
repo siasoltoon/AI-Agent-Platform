@@ -1,0 +1,3 @@
+# Dashboard Architecture
+
+The dashboard is the control-plane UI for AI-Agent-Platform. It consumes Backend as the source of truth and never executes filesystem or terminal operations directly.
