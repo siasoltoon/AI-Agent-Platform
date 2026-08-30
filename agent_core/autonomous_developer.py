@@ -8,6 +8,7 @@ from agent_core.acceptance import MissionAcceptanceGate
 from agent_core.adaptive_planner import AdaptivePlanner
 from agent_core.context_manager import MissionContextManager
 from agent_core.mission_memory import MissionMemory, MissionMemoryStore
+from agent_core.runtime import DEFAULT_LARGE_AGENT_STEPS
 from agent_core.task_graph import GraphTask, TaskGraph
 from agent_core.verification import classify_failure, verify_execution, FailureClass
 
@@ -76,7 +77,8 @@ class AutonomousDeveloper:
                     try:
                         result = self.runtime.execute(prompt, task_id=f"{mission_id}:{task.task_id}:{attempt}",
                                                      metadata={"mission_id": mission_id, "mission_task": task.task_id,
-                                                               "max_agent_steps": 64, "execution_profile": "large"})
+                                                               "max_agent_steps": DEFAULT_LARGE_AGENT_STEPS,
+                                                               "execution_profile": "large"})
                         nested = result.get("result", {}).get("result", {})
                         verification = verify_execution(nested)
                         if not verification.verified:
