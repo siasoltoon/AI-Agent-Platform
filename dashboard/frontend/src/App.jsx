@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { apiRequest } from './api/client';
-import { getDashboardSummary, getDiagnostics, getTaskEvents, cancelTask, retryTask, createTask, getTasks, getTask } from './api/dashboard';
+import { getDashboardSummary, getDiagnostics, getTaskEvents, cancelTask, retryTask } from './api/dashboard';
+import { createTask, getTasks, getTask } from './api/tasks';
 import './styles/global.css';
 
 const NAV = [['overview','⌂','Overview'],['tasks','✓','Tasks'],['agents','◈','Agents'],['workers','▣','Workers'],['executions','◷','Executions'],['logs','≡','Logs'],['monitoring','⌁','Monitoring'],['models','◇','Models'],['tools','⚒','Tools'],['diagnostics','⊙','Diagnostics'],['settings','⚙','Settings']];
