@@ -24,7 +24,12 @@ MAX_TASK_ID_CHARS = 128
 MAX_MODEL_CHARS = 128
 MAX_TIMEOUT_SECONDS = 1800
 MAX_METADATA_KEYS = 64
-MAX_AGENT_STEPS = 64
+MAX_AGENT_STEPS = 32
+
+# Compatibility injection point retained for the existing worker contract and
+# tests. It now points to the self-repairing executor, so the default behavior
+# is still the hardened path rather than the old one-shot executor.
+AgentExecutor = ReliableAgentExecutor
 
 
 class ExecuteRequest(BaseModel):
@@ -100,15 +105,14 @@ class Worker:
                 raise ValueError(f"max_agent_steps must be between 1 and {MAX_AGENT_STEPS}.")
 
             logger.info(
-                "Executing task_id=%s model=%s prompt_length=%s timeout=%s mode=agentic-reliable max_agent_steps=%s",
-                job.get("task_id"), model, len(prompt), timeout, requested_steps,
+                "Executing task_id=%s model=%s prompt_length=%s timeout=%s mode=agentic-reliable max_agent_steps=%s self_repair_attempts=%s",
+                job.get("task_id"), model, len(prompt), timeout, requested_steps, ReliableAgentExecutor.MAX_ATTEMPTS,
             )
             service = OllamaService(base_url=OLLAMA_HOST, model=model, timeout=timeout)
-            executor = ReliableAgentExecutor(
+            executor = AgentExecutor(
                 service,
                 workspace_root=workspace,
                 max_steps=requested_steps,
-                max_attempts=6,
             )
             result = executor.execute(prompt)
 
