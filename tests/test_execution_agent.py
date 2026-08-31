@@ -30,6 +30,19 @@ def test_agent_executor_writes_and_verifies_real_file(tmp_path: Path):
     assert all(check["passed"] for check in result["execution_evidence"]["checks"])
 
 
+def test_agent_executor_recovers_from_malformed_action_json(tmp_path: Path):
+    ollama = FakeOllama([
+        "I will do it now, but this is not JSON.",
+        '{"action":"write_file","args":{"path":"recovered.txt","content":"ok"}}',
+        '{"action":"done","summary":"Recovered"}',
+    ])
+    result = AgentExecutor(ollama, workspace_root=str(tmp_path), max_steps=3).execute("Create recovered.txt")
+    assert result["status"] == "completed"
+    assert (tmp_path / "recovered.txt").read_text(encoding="utf-8") == "ok"
+    assert result["steps"][0]["decision_error"] == "Model did not return a valid JSON action."
+    assert "ACTION FORMAT ERROR" in ollama.prompts[1]
+
+
 def test_agent_executor_accepts_file_tool_shorthand_without_explicit_read(tmp_path: Path):
     ollama = FakeOllama([
         '{"action":"write_file","args":{"path":"hello.txt","content":"hello world"}}',
