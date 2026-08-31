@@ -7,7 +7,15 @@ from task_engine.contracts import TaskStatus
 
 class FakeRouter:
     def __init__(self, result=None, error=None):
-        self.result = result or {"execution_mode": "agentic", "result": {"steps": 2}}
+        self.result = result or {
+            "execution_mode": "agentic",
+            "result": {
+                "status": "completed",
+                "execution_evidence": {"verified": True, "checks": [{"type": "smoke", "passed": True}]},
+                "tool_records": [{"ok": True, "tool": "write_file"}],
+                "steps": 2,
+            },
+        }
         self.error = error
 
     def route(self, task, *, task_id):
@@ -56,6 +64,26 @@ def test_runner_executes_queued_task_and_persists_result(tmp_path):
     assert task["status"] == TaskStatus.COMPLETED.value
     assert task["result"]["result"]["steps"] == 2
     assert task["metadata"]["execution_mode"] == "agentic"
+    assert task["metadata"]["execution_evidence"]["verified"] is True
+    assert task["error"] is None
+
+
+def test_runner_rejects_completion_without_verified_evidence(tmp_path):
+    store = TaskStore(tmp_path / "tasks.db")
+    seed(store)
+    result = {
+        "execution_mode": "agentic",
+        "result": {"status": "completed", "execution_evidence": {"verified": False}, "tool_records": [{"ok": True}]},
+    }
+    runner = TaskRunner(store, FakeRouter(result=result))
+    runner.start()
+    try:
+        task = wait_for_terminal(store, "task-1")
+    finally:
+        runner.stop()
+
+    assert task["status"] == TaskStatus.FAILED.value
+    assert "verified execution evidence" in task["error"]
 
 
 def test_runner_persists_execution_failure(tmp_path):
