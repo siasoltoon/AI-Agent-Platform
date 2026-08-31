@@ -1,9 +1,8 @@
 """Self-repairing orchestration layer for autonomous coding tasks.
 
-This wrapper turns the low-level plan/act/observe loop into a more durable
-mission loop: premature completion is rejected, failed attempts are converted
-into actionable continuation prompts, and successful work is re-checked before
-it is accepted.
+The reliable executor keeps a mission alive until the observable completion
+contract passes. Failed actions, incomplete work and weak evidence become
+continuation prompts instead of premature success.
 """
 
 from __future__ import annotations
@@ -19,7 +18,7 @@ from backend.services.ollama_service import OllamaService
 class ReliableAgentExecutor:
     """Run an agent task with bounded self-repair and completion-quality gates."""
 
-    MAX_ATTEMPTS = 4
+    MAX_ATTEMPTS = 6
     DEFAULT_AGENT_STEPS = 64
 
     def __init__(
@@ -82,10 +81,16 @@ class ReliableAgentExecutor:
             blockers.append("no_successful_tool_action")
 
         tools = {str(record.get("tool", "")).lower() for record in successful}
-        terminal_commands = [cls._command(record).lower() for record in successful if str(record.get("tool", "")).lower() == "terminal" or str(record.get("tool", "")).lower() in {"pytest", "python", "py", "pip", "npm", "node", "ruff", "mypy", "black", "vite"}]
+        terminal_commands = [
+            cls._command(record).lower()
+            for record in successful
+            if str(record.get("tool", "")).lower() == "terminal"
+            or str(record.get("tool", "")).lower() in {"pytest", "python", "py", "pip", "npm", "node", "ruff", "mypy", "black", "vite"}
+        ]
 
         if requirements["tests"] and not any(
-            "pytest" in command or "test" in command and any(token in command for token in ("python", "py", "npm", "yarn", "pnpm", "cargo", "go"))
+            "pytest" in command
+            or ("test" in command and any(token in command for token in ("python", "py", "npm", "yarn", "pnpm", "cargo", "go")))
             for command in terminal_commands
         ):
             blockers.append("requested_tests_not_executed_successfully")
@@ -99,13 +104,24 @@ class ReliableAgentExecutor:
         if requirements["inspect"] and not (tools & {"read_file", "list_directory", "search_files", "file_exists", "directory_exists", "terminal"}):
             blockers.append("requested_inspection_not_observed")
 
-        # Large, multi-requirement coding tasks should never finish after one
-        # trivial mutation. A genuine implementation normally has multiple
-        # observable mutations or a successful verification command.
         complexity = len(prompt) >= 700 or len(re.findall(r"(?:^|\n)\s*\d+[.)]", prompt)) >= 3
-        mutations = [record for record in successful if str(record.get("tool", "")).lower() in {"write_file", "make_directory", "copy_file", "move_file", "delete_file"}]
+        mutations = [
+            record for record in successful
+            if str(record.get("tool", "")).lower() in {"write_file", "make_directory", "copy_file", "move_file", "delete_file"}
+        ]
         if complexity and len(mutations) < 2 and not terminal_commands:
             blockers.append("complex_task_has_insufficient_observable_work")
+
+        # A complex coding mission must demonstrate an actual final audit, not
+        # just successful writes. The low-level executor's evidence remains the
+        # source of truth; this gate only requires the audit action to be visible.
+        if complexity and not any(
+            "read_file" == str(record.get("tool", "")).lower()
+            or "test" in cls._command(record).lower()
+            or "pytest" in cls._command(record).lower()
+            for record in successful
+        ):
+            blockers.append("complex_task_has_no_final_audit_observed")
 
         return not blockers, blockers
 
@@ -114,14 +130,18 @@ class ReliableAgentExecutor:
         if result:
             evidence = self._evidence(result)
             records = self._records(result)
-            recent = records[-8:]
-            summary = json.dumps({"evidence": evidence, "recent_tool_records": recent}, ensure_ascii=False, default=str)
+            recent = records[-12:]
+            summary = json.dumps(
+                {"evidence": evidence, "recent_tool_records": recent},
+                ensure_ascii=False,
+                default=str,
+            )
             if len(summary) > self.max_output_chars:
                 summary = summary[: self.max_output_chars] + "...<truncated>"
 
-        return f"""Continue the existing autonomous coding task. This is recovery attempt {attempt}.
+        return f"""Continue the existing autonomous coding mission. This is recovery attempt {attempt}.
 
-ORIGINAL TASK:
+ORIGINAL MISSION:
 {prompt}
 
 PREVIOUS ATTEMPT PROBLEM:
@@ -130,16 +150,19 @@ PREVIOUS ATTEMPT PROBLEM:
 PREVIOUS OBSERVATIONS:
 {summary or "No usable previous result was returned."}
 
-RECOVERY RULES:
-- Do not restart blindly. Inspect the current workspace and preserve correct work.
-- Determine what requirements are already satisfied and what is still missing.
-- Fix the root cause of the failure, then continue implementation.
-- If a command/test fails, diagnose the actual failure, repair it, and rerun it.
-- For complex tasks, do not stop after creating a few files. Complete the requested functionality.
-- Before completion, perform concrete verification of the final state.
-- Return the required JSON action format only.
-- Never claim done unless the observable evidence proves the original task is complete.
-"""
+MISSION CONTINUATION CONTRACT:
+1. Inspect the current workspace first; do not restart or overwrite correct work.
+2. Treat the original mission as authoritative. Preserve every requirement, file, command, constraint and acceptance criterion.
+3. Identify what is already complete and what is still missing.
+4. Repair the root cause of the previous failure before proceeding.
+5. Continue implementing until the requested functionality is actually present.
+6. Run requested tests/builds/checks and repair failures rather than reporting them.
+7. Perform a final audit of the resulting files and behavior using concrete tools.
+8. If a verification read or test disproves the result, repair it and verify again.
+9. Do not return done merely because files were created or a previous step succeeded.
+10. Return only the required JSON action format.
+
+The goal of this recovery attempt is to finish the ORIGINAL MISSION, not to explain why it is difficult."""
 
     def execute(self, prompt: str) -> dict[str, Any]:
         if not prompt or not prompt.strip():
