@@ -20,30 +20,32 @@
         "&":"&amp;", "<":"&lt;", ">":"&gt;", "\"":"&quot;", "'":"&#39;"
       }[c]));
       const percent = (value) => Number.isFinite(Number(value)) ? `${Number(value).toFixed(1)}%` : "N/A";
-      const state = { workers: null, updated: null, error: null };
+      const state = { workers: null, updated: null };
 
-      function cardHtml() {
+      function bodyHtml() {
         const workers = Array.isArray(state.workers?.workers) ? state.workers.workers : [];
         if (!workers.length) {
-          return `<section class="card" id="live-worker-health"><div class="card-head"><h2>Worker health</h2><span>live telemetry</span></div><div class="card-body"><div class="notice"><strong>Worker unavailable</strong>Live CPU, RAM and GPU telemetry will appear automatically when the configured worker is reachable.</div></div></section>`;
+          return `<div class="notice"><strong>Worker unavailable</strong>Live CPU, RAM and GPU telemetry will appear automatically when the configured worker is reachable.</div>`;
         }
-        return `<section class="card" id="live-worker-health" style="margin-bottom:16px"><div class="card-head"><h2>Worker health</h2><span>live telemetry · ${state.updated ? new Date(state.updated).toLocaleTimeString() : "connecting…"}</span></div><div class="card-body"><div class="health-grid">${workers.map((w) => {
+        return `<div class="health-grid">${workers.map((w) => {
           const r = w.resources || {};
           const status = String(w.worker_status || w.status || "unknown").toUpperCase();
           return `<div class="health-item"><strong>${escapeHtml(w.worker_id || "Worker")} · ${escapeHtml(status)}</strong><span>CPU <b>${percent(r.cpu_percent)}</b> · RAM <b>${percent(r.ram_percent)}</b> · GPU <b>${percent(r.gpu_percent)}</b></span></div>`;
-        }).join("")}</div></div></section>`;
+        }).join("")}</div>`;
       }
 
       function mount() {
         const content = document.querySelector("#app .content");
         if (!content) return;
-        const existing = document.getElementById("live-worker-health");
-        const html = cardHtml();
-        if (existing) {
-          existing.outerHTML = html;
-        } else {
-          content.insertAdjacentHTML("afterbegin", html);
+        let card = document.getElementById("live-worker-health");
+        if (!card) {
+          content.insertAdjacentHTML("afterbegin", `<section class="card" id="live-worker-health" style="margin-bottom:16px"><div class="card-head"><h2>Worker health</h2><span id="worker-health-updated">live telemetry</span></div><div class="card-body" id="worker-health-body"></div></section>`);
+          card = document.getElementById("live-worker-health");
         }
+        const body = document.getElementById("worker-health-body");
+        const updated = document.getElementById("worker-health-updated");
+        if (body) body.innerHTML = bodyHtml();
+        if (updated) updated.textContent = state.updated ? `live telemetry · ${new Date(state.updated).toLocaleTimeString()}` : "live telemetry · connecting…";
       }
 
       async function poll() {
@@ -52,15 +54,16 @@
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
           state.workers = await response.json();
           state.updated = Date.now();
-          state.error = null;
-        } catch (error) {
-          state.error = error;
+        } catch (_) {
           state.workers = null;
+          state.updated = null;
         }
         mount();
       }
 
-      const observer = new MutationObserver(() => mount());
+      const observer = new MutationObserver(() => {
+        if (!document.getElementById("live-worker-health")) mount();
+      });
       observer.observe(document.getElementById("app"), { childList: true, subtree: true });
       poll();
       window.setInterval(poll, 1000);
