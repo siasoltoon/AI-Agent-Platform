@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field, field_validator
 from agent_core.execution_agent import AgentExecutionError
 from agent_core.reliable_executor import ReliableAgentExecutor
 from backend.services.ollama_service import OllamaService
+from backend.services.telemetry import snapshot as resource_snapshot
 from config.worker_config import DEFAULT_MODEL, OLLAMA_HOST, WORKER_TIMEOUT
 
 logger = logging.getLogger("ai_agent_worker")
@@ -107,7 +108,7 @@ class Worker:
                 service,
                 workspace_root=workspace,
                 max_steps=requested_steps,
-                max_attempts=4,
+                max_attempts=6,
             )
             result = executor.execute(prompt)
 
@@ -121,6 +122,7 @@ class Worker:
                 "task_id": job.get("task_id"),
                 "model": model,
                 "result": result,
+                "resource_snapshot": resource_snapshot(),
             }
         except Exception as exc:
             self.last_error = str(exc)
@@ -132,11 +134,12 @@ class Worker:
 
 
 worker = Worker("pc-worker-01")
-app = FastAPI(title="AI Agent Platform Worker", version="0.6.0")
+app = FastAPI(title="AI Agent Platform Worker", version="0.7.0")
 
 
 @app.get("/health")
 def health() -> dict[str, Any]:
+    """Return worker health plus a live host resource snapshot."""
     return {
         "status": "healthy",
         "worker_id": worker.worker_id,
@@ -149,6 +152,7 @@ def health() -> dict[str, Any]:
         "self_repair_attempts": ReliableAgentExecutor.MAX_ATTEMPTS,
         "last_completed_at": worker.last_completed_at,
         "last_error": worker.last_error,
+        "resources": resource_snapshot(),
     }
 
 
