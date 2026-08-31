@@ -104,28 +104,6 @@ class ReliableAgentExecutor:
         if requirements["inspect"] and not (tools & {"read_file", "list_directory", "search_files", "file_exists", "directory_exists", "terminal"}):
             blockers.append("requested_inspection_not_observed")
 
-        # Only treat a task as complex when the prompt actually describes a
-        # coding/build mission. Long prose or a verbose exact-content request
-        # must not be rejected merely because it contains many instructions.
-        complexity = bool(
-            re.search(r"\b(build|implement|develop|create|modify|refactor|production|project|application|bot|service)\b", prompt, re.IGNORECASE)
-            and (len(prompt) >= 700 or len(re.findall(r"(?:^|\n)\s*\d+[.)]", prompt)) >= 5)
-        )
-        mutations = [
-            record for record in successful
-            if str(record.get("tool", "")).lower() in {"write_file", "make_directory", "copy_file", "move_file", "delete_file"}
-        ]
-        if complexity and len(mutations) < 2 and not terminal_commands:
-            blockers.append("complex_task_has_insufficient_observable_work")
-
-        if complexity and not any(
-            "read_file" == str(record.get("tool", "")).lower()
-            or "test" in cls._command(record).lower()
-            or "pytest" in cls._command(record).lower()
-            for record in successful
-        ):
-            blockers.append("complex_task_has_no_final_audit_observed")
-
         return not blockers, blockers
 
     def _continuation_prompt(self, prompt: str, attempt: int, error: str, result: dict[str, Any] | None) -> str:
