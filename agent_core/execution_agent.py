@@ -203,6 +203,11 @@ class AgentExecutor:
             raise AgentExecutionError("Terminal timeout must be between 1 and 600 seconds.")
         return {**self.terminal.execute(command, timeout=timeout), "command": command}
 
+    @staticmethod
+    def _verification_requested(task: str) -> bool:
+        lower = task.lower()
+        return any(word in lower for word in ("verify", "check", "confirm", "ensure", "exactly", "read"))
+
     def _verify_evidence(self, task: str, records: list[dict[str, Any]]) -> dict[str, Any]:
         successful = [record for record in records if record.get("ok") is True]
         failed = [record for record in records if record.get("ok") is not True]
@@ -210,6 +215,11 @@ class AgentExecutor:
 
         writes = [record for record in successful if record.get("tool") == "write_file"]
         reads = [record for record in successful if record.get("tool") == "read_file"]
+        write_contents = {
+            record.get("result", {}).get("path"): record.get("result", {}).get("content")
+            for record in writes
+            if record.get("result", {}).get("path")
+        }
 
         for record in writes:
             result = record.get("result", {})
@@ -223,14 +233,25 @@ class AgentExecutor:
             if exists and isinstance(expected, str):
                 try:
                     actual = path.read_text(encoding="utf-8")
-                    checks.append({"type": "file_content_matches_write", "path": rel, "passed": actual == expected})
+                    checks.append({"type": "file_content_matches_write", "path": rel, "expected_content": expected, "passed": actual == expected})
                 except OSError as exc:
                     checks.append({"type": "file_content_readable", "path": rel, "passed": False, "error": str(exc)})
 
         for record in reads:
-            rel = record.get("result", {}).get("path")
-            if rel:
-                checks.append({"type": "read_verified_exists", "path": rel, "passed": self._safe_path(rel).is_file()})
+            result = record.get("result", {})
+            rel = result.get("path")
+            if not rel:
+                continue
+            path = self._safe_path(rel)
+            checks.append({"type": "read_verified_exists", "path": rel, "passed": path.is_file()})
+            if rel in write_contents and isinstance(write_contents[rel], str):
+                checks.append({
+                    "type": "read_content_matches_write",
+                    "path": rel,
+                    "expected_content": write_contents[rel],
+                    "actual_content": result.get("content"),
+                    "passed": result.get("content") == write_contents[rel],
+                })
 
         for record in successful:
             tool = record.get("tool")
@@ -260,14 +281,11 @@ class AgentExecutor:
                 result = record.get("result", {})
                 checks.append({"type": "terminal_success", "command": result.get("command"), "passed": result.get("code") == 0})
 
-        lower = task.lower()
-        verification_requested = any(word in lower for word in ("verify", "check", "confirm", "ensure", "exactly", "read"))
+        verification_requested = self._verification_requested(task)
         required = [check for check in checks if check["type"] != "terminal_success"]
         failed_checks = [check for check in required if not check.get("passed")]
         mutating = any(record.get("tool") in self._MUTATING_TOOLS for record in successful)
 
-        # Exploratory failures can be recovered from. Explicit verification requests,
-        # however, still require an actual read action in the agent trace.
         verified = bool(successful) and not failed_checks
         if writes and verification_requested and not reads:
             verified = False
@@ -285,6 +303,7 @@ class AgentExecutor:
         if not task or not task.strip():
             raise AgentExecutionError("Task cannot be empty.")
 
+        verification_requested = self._verification_requested(task)
         system = """You are the production autonomous coding agent.
 Return exactly one JSON object per turn:
 {"action":"tool","tool":"TOOL_NAME","args":{...}} or {"action":"done","summary":"..."}
@@ -293,6 +312,18 @@ Workspace tools: read_file, write_file, file_exists, directory_exists, list_dire
 Execution tool: terminal. Terminal aliases include type, cat, dir, ls, pwd, where, findstr, fc, tree, more, echo, mkdir, mktemp, whoami, hostname, ver, date, time, python, py, pytest, pip, pip3, git, uvicorn, ruff, black, mypy, node, npm, npx, vite, yarn, pnpm, dotnet, java, javac, go, cargo, rustc.
 
 Rules: stay inside workspace; inspect before risky changes; prefer dedicated tools; after every mutation ensure the resulting state is observable; for requested content verify exact equality; never claim completion without evidence; recover from transient failures when possible; return done only when evidence supports success."""
+        if verification_requested:
+            system += """
+
+MANDATORY EXACT-CONTENT VERIFICATION PROTOCOL:
+When the task asks you to create or write a file and verify/check/confirm exact content, follow this sequence without skipping steps:
+1. Use write_file for the requested file and exact requested content.
+2. Immediately after the successful write, use read_file on that same file path. Do not use a directory listing, file_exists, terminal, or model reasoning as a substitute for read_file.
+3. Compare the read_file content character-for-character with the requested content. If it does not match, perform a recovery write and then read the same file again.
+4. Only after the direct read verification succeeds may you return done.
+5. If verification fails, do not return done; recover and repeat the write/read verification sequence.
+The execution runtime independently validates the real filesystem and generated evidence; never fabricate verification results."""
+
         conversation = f"{system}\n\nTASK:\n{task.strip()}\n\nWORKSPACE:\n{self.workspace}"
         actions: list[dict[str, Any]] = []
         records: list[dict[str, Any]] = []
@@ -323,6 +354,8 @@ Rules: stay inside workspace; inspect before risky changes; prefer dedicated too
                         "tool_records": records,
                     }
                 conversation += "\n\nVERIFICATION FAILED. Continue execution and repair or verify the observable state. Do not claim success yet."
+                if verification_requested and any(record.get("tool") == "write_file" and record.get("ok") is True for record in records) and not any(record.get("tool") == "read_file" and record.get("ok") is True for record in records):
+                    conversation += "\n\nMANDATORY RECOVERY: A write was completed but direct read verification is missing. Your next action MUST be read_file on the exact file path that was written. Do not use done or another verification substitute."
                 continue
 
             if decision.get("action") != "tool":
@@ -347,5 +380,8 @@ Rules: stay inside workspace; inspect before risky changes; prefer dedicated too
             if len(serialized) > self.max_output_chars:
                 serialized = serialized[: self.max_output_chars] + "...<truncated>"
             conversation += f"\n\nOBSERVATION step {step}: tool={tool}\n{serialized}\n\nContinue, recover, or verify before done."
+            if verification_requested and tool == "write_file" and record.get("ok") is True:
+                written_path = record.get("result", {}).get("path")
+                conversation += f"\n\nMANDATORY NEXT ACTION: The write to {written_path!r} succeeded. You MUST now call read_file for exactly that path and compare its returned content character-for-character with the requested content before any done action."
 
         raise AgentExecutionError(f"Agent exceeded maximum execution steps ({self.max_steps}).")
