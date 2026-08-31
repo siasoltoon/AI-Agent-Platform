@@ -14,7 +14,7 @@ from task_engine.exact_content_gate import verify_exact_content
 class TaskRunner:
     """Run persisted tasks outside HTTP with bounded retries and cancellation safety."""
 
-    def __init__(self, store, router, *, poll_seconds: float = 0.25, default_retries: int = 2) -> None:
+    def __init__(self, store, router, *, poll_seconds: float = 0.25, default_retries: int = 5) -> None:
         self.store = store
         self.router = router
         self.poll_seconds = max(0.05, float(poll_seconds))
@@ -54,9 +54,9 @@ class TaskRunner:
     @staticmethod
     def _retry_budget(metadata: dict) -> int:
         try:
-            value = int(metadata.get("max_retries", 2))
+            value = int(metadata.get("max_retries", 5))
         except (TypeError, ValueError):
-            value = 2
+            value = 5
         return max(0, min(value, 5))
 
     @staticmethod
@@ -300,4 +300,4 @@ class TaskRunner:
 
 
 DEFAULT_POLL_SECONDS = float(os.getenv("TASK_RUNNER_POLL_SECONDS", "0.25"))
-DEFAULT_TASK_RETRIES = max(0, min(int(os.getenv("TASK_RUNNER_MAX_RETRIES", "2")), 5))
+DEFAULT_TASK_RETRIES = max(0, min(int(os.getenv("TASK_RUNNER_MAX_RETRIES", "5")), 5))
