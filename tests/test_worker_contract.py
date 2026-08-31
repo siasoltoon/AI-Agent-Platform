@@ -9,6 +9,7 @@ from worker_system.worker import (
     MAX_TASK_ID_CHARS,
     MAX_TIMEOUT_SECONDS,
     ExecuteRequest,
+    Worker,
 )
 
 
@@ -53,3 +54,51 @@ def test_worker_request_rejects_too_many_metadata_keys():
 
 def test_worker_agent_steps_are_explicitly_bounded():
     assert MAX_AGENT_STEPS == 32
+
+
+def test_worker_defaults_agent_steps_to_published_contract(monkeypatch):
+    captured = {}
+
+    class FakeService:
+        def __init__(self, **kwargs):
+            pass
+
+    class FakeExecutor:
+        def __init__(self, service, workspace_root=None, max_steps=None):
+            captured["max_steps"] = max_steps
+
+        def execute(self, prompt):
+            return {"status": "completed", "execution_evidence": {"verified": True}}
+
+    import worker_system.worker as worker_module
+
+    monkeypatch.setattr(worker_module, "OllamaService", FakeService)
+    monkeypatch.setattr(worker_module, "AgentExecutor", FakeExecutor)
+
+    Worker("test-worker").execute({"prompt": "hello", "metadata": {}})
+
+    assert captured["max_steps"] == MAX_AGENT_STEPS
+
+
+def test_worker_honors_smaller_requested_agent_step_budget(monkeypatch):
+    captured = {}
+
+    class FakeService:
+        def __init__(self, **kwargs):
+            pass
+
+    class FakeExecutor:
+        def __init__(self, service, workspace_root=None, max_steps=None):
+            captured["max_steps"] = max_steps
+
+        def execute(self, prompt):
+            return {"status": "completed", "execution_evidence": {"verified": True}}
+
+    import worker_system.worker as worker_module
+
+    monkeypatch.setattr(worker_module, "OllamaService", FakeService)
+    monkeypatch.setattr(worker_module, "AgentExecutor", FakeExecutor)
+
+    Worker("test-worker").execute({"prompt": "hello", "metadata": {"max_agent_steps": 8}})
+
+    assert captured["max_steps"] == 8
