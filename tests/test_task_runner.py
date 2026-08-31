@@ -94,7 +94,7 @@ def test_runner_rejects_verified_but_irrelevant_file_evidence(tmp_path):
         "result": {
             "status": "completed",
             "execution_evidence": {"verified": True, "checks": [{"type": "file_exists", "path": "other.txt", "passed": True}]},
-            "tool_records": [{"ok": True, "tool": "write_file"}],
+            "tool_records": [{"ok": True, "tool": "write_file", "result": {"path": "other.txt"}}],
         },
     }
     runner = TaskRunner(store, FakeRouter(result=result))
@@ -116,7 +116,131 @@ def test_runner_requires_exact_content_evidence_for_exact_file_task(tmp_path):
         "result": {
             "status": "completed",
             "execution_evidence": {"verified": True, "checks": [{"type": "file_exists", "path": "exact.txt", "passed": True}]},
-            "tool_records": [{"ok": True, "tool": "write_file"}],
+            "tool_records": [{"ok": True, "tool": "write_file", "result": {"path": "exact.txt"}}],
+        },
+    }
+    runner = TaskRunner(store, FakeRouter(result=result))
+    runner.start()
+    try:
+        task = wait_for_terminal(store, "task-1")
+    finally:
+        runner.stop()
+
+    assert task["status"] == TaskStatus.FAILED.value
+
+
+def test_runner_rejects_unexpected_mutation_for_restricted_task(tmp_path):
+    store = TaskStore(tmp_path / "tasks.db")
+    seed(store, prompt="Create requested.txt. Do not modify or delete any other files.")
+    result = {
+        "execution_mode": "agentic",
+        "result": {
+            "status": "completed",
+            "execution_evidence": {
+                "verified": True,
+                "checks": [
+                    {"type": "file_exists", "path": "requested.txt", "passed": True},
+                    {"type": "file_content_matches_write", "path": "requested.txt", "passed": True},
+                ],
+            },
+            "tool_records": [
+                {"ok": True, "tool": "write_file", "result": {"path": "requested.txt", "content": "ok"}},
+                {"ok": True, "tool": "make_directory", "result": {"path": "test_directory"}},
+            ],
+        },
+    }
+    runner = TaskRunner(store, FakeRouter(result=result))
+    runner.start()
+    try:
+        task = wait_for_terminal(store, "task-1")
+    finally:
+        runner.stop()
+
+    assert task["status"] == TaskStatus.FAILED.value
+    assert "unauthorized workspace side effects" in task["error"]
+
+
+def test_runner_accepts_only_requested_mutation_for_restricted_task(tmp_path):
+    store = TaskStore(tmp_path / "tasks.db")
+    seed(store, prompt="Create requested.txt. Do not modify or delete any other files.")
+    result = {
+        "execution_mode": "agentic",
+        "result": {
+            "status": "completed",
+            "execution_evidence": {
+                "verified": True,
+                "checks": [
+                    {"type": "file_exists", "path": "requested.txt", "passed": True},
+                    {"type": "file_content_matches_write", "path": "requested.txt", "passed": True},
+                ],
+            },
+            "tool_records": [
+                {"ok": True, "tool": "write_file", "result": {"path": "requested.txt", "content": "ok"}},
+            ],
+        },
+    }
+    runner = TaskRunner(store, FakeRouter(result=result))
+    runner.start()
+    try:
+        task = wait_for_terminal(store, "task-1")
+    finally:
+        runner.stop()
+
+    assert task["status"] == TaskStatus.COMPLETED.value
+    evidence = task["metadata"]["execution_evidence"]
+    assert evidence["scope_verified"] is True
+    assert evidence["requested_paths"] == ["requested.txt"]
+    assert evidence["unexpected_paths"] == []
+
+
+def test_runner_rejects_unscoped_terminal_mutation_for_restricted_task(tmp_path):
+    store = TaskStore(tmp_path / "tasks.db")
+    seed(store, prompt="Create requested.txt. Do not modify anything else.")
+    result = {
+        "execution_mode": "agentic",
+        "result": {
+            "status": "completed",
+            "execution_evidence": {
+                "verified": True,
+                "checks": [
+                    {"type": "file_exists", "path": "requested.txt", "passed": True},
+                    {"type": "file_content_matches_write", "path": "requested.txt", "passed": True},
+                ],
+            },
+            "tool_records": [
+                {"ok": True, "tool": "write_file", "result": {"path": "requested.txt", "content": "ok"}},
+                {"ok": True, "tool": "terminal", "result": {"command": "echo extra > other.txt", "code": 0}},
+            ],
+        },
+    }
+    runner = TaskRunner(store, FakeRouter(result=result))
+    runner.start()
+    try:
+        task = wait_for_terminal(store, "task-1")
+    finally:
+        runner.stop()
+
+    assert task["status"] == TaskStatus.FAILED.value
+
+
+def test_runner_rejects_terminal_mkdir_for_restricted_task(tmp_path):
+    store = TaskStore(tmp_path / "tasks.db")
+    seed(store, prompt="Create requested.txt. Do not modify or delete any other files.")
+    result = {
+        "execution_mode": "agentic",
+        "result": {
+            "status": "completed",
+            "execution_evidence": {
+                "verified": True,
+                "checks": [
+                    {"type": "file_exists", "path": "requested.txt", "passed": True},
+                    {"type": "file_content_matches_write", "path": "requested.txt", "passed": True},
+                ],
+            },
+            "tool_records": [
+                {"ok": True, "tool": "write_file", "result": {"path": "requested.txt", "content": "ok"}},
+                {"ok": True, "tool": "terminal", "result": {"command": "mkdir test_directory", "code": 0}},
+            ],
         },
     }
     runner = TaskRunner(store, FakeRouter(result=result))
