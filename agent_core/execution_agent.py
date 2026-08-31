@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any
 
+from agent_core.action_parser import ActionParseError, ActionParser
 from backend.services.ollama_service import OllamaService
 from tool_system.file_tools import (
     CopyFileTool,
@@ -75,39 +75,9 @@ class AgentExecutor:
             raise AgentExecutionError("Path escapes the configured workspace.")
         return candidate
 
-    @staticmethod
-    def _extract_json(text: str) -> dict[str, Any]:
-        text = str(text or "").strip()
-        candidates = [text]
-        candidates.extend(re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL | re.IGNORECASE))
-        for candidate in candidates:
-            try:
-                value = json.loads(candidate)
-                if isinstance(value, dict):
-                    return value
-            except json.JSONDecodeError:
-                continue
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if match:
-            try:
-                value = json.loads(match.group(0))
-                if isinstance(value, dict):
-                    return value
-            except json.JSONDecodeError:
-                pass
-        raise AgentExecutionError("Model did not return a valid JSON action.")
-
     @classmethod
     def _normalize_decision(cls, decision: dict[str, Any]) -> dict[str, Any]:
-        action = str(decision.get("action", "")).strip().lower()
-        tool = str(decision.get("tool", "")).strip().lower()
-        if action in cls._TOOLS:
-            return {**decision, "action": "tool", "tool": tool or action}
-        if action in cls._TERMINAL_ALIASES:
-            return {**decision, "action": "tool", "tool": action}
-        if tool in cls._TOOLS or tool in cls._TERMINAL_ALIASES:
-            return {**decision, "action": "tool", "tool": tool}
-        return decision
+        return ActionParser.normalize(decision, cls._TOOLS, cls._TERMINAL_ALIASES)
 
     @staticmethod
     def _arg(args: dict[str, Any], *names: str, default: Any = "") -> Any:
@@ -336,7 +306,17 @@ The execution runtime independently validates the real filesystem and generated 
                     raise AgentExecutionError("Agent stopped without executing any tool action.") from exc
                 raise AgentExecutionError("Agent stopped before producing a verified completion.") from exc
 
-            decision = self._normalize_decision(self._extract_json(response.get("response", "")))
+            try:
+                decision = self._normalize_decision(ActionParser.extract_object(response.get("response", "")))
+            except ActionParseError as exc:
+                actions.append({"step": step, "decision_error": str(exc)})
+                conversation += (
+                    "\n\nACTION FORMAT ERROR: Your previous response could not be parsed as a JSON object. "
+                    "Recover by returning ONLY one valid JSON object. No markdown, prose, or code fence. "
+                    "Use exactly the required action schema and continue the task."
+                )
+                continue
+
             actions.append({"step": step, "decision": decision})
 
             if decision.get("action") == "done":
