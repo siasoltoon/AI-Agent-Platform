@@ -64,6 +64,22 @@ class TaskRunner:
         except (TypeError, ValueError):
             return 0
 
+    @staticmethod
+    def _execution_evidence(result: dict) -> dict | None:
+        """Extract the canonical agent evidence through the runtime/worker envelope."""
+        candidates = [result]
+        nested = result.get("result")
+        if isinstance(nested, dict):
+            candidates.append(nested)
+            nested_result = nested.get("result")
+            if isinstance(nested_result, dict):
+                candidates.append(nested_result)
+        for candidate in candidates:
+            evidence = candidate.get("execution_evidence")
+            if isinstance(evidence, dict):
+                return evidence
+        return None
+
     def _fail_or_retry(self, task_id: str, record: dict, error: str) -> None:
         if self.store.is_cancelled(task_id):
             return
@@ -101,11 +117,16 @@ class TaskRunner:
             if self.store.is_cancelled(task_id):
                 return
 
+            evidence = self._execution_evidence(result) if isinstance(result, dict) else None
+            if not isinstance(evidence, dict) or evidence.get("verified") is not True:
+                raise RuntimeError("Task execution completed without verified execution evidence.")
+
             current = self.store.get(task_id) or record
             execution_metadata = {
                 "execution_mode": result.get("execution_mode", "agentic"),
                 "duration_seconds": round(time.time() - started, 3),
                 "retry_count": self._retry_count(current.get("metadata", {})),
+                "execution_evidence": evidence,
             }
             nested = result.get("result")
             if isinstance(nested, dict):
@@ -113,11 +134,16 @@ class TaskRunner:
                     "steps": nested.get("steps", 1),
                     "orchestration_mode": nested.get("mode", "agentic"),
                 })
+                nested_result = nested.get("result")
+                if isinstance(nested_result, dict):
+                    execution_metadata["steps"] = nested_result.get("steps", execution_metadata["steps"])
+                    execution_metadata["orchestration_mode"] = nested_result.get("mode", execution_metadata["orchestration_mode"])
             self.store.update(
                 task_id,
                 status=TaskStatus.COMPLETED.value,
                 completed_at=time.time(),
                 result=result,
+                error=None,
                 metadata={**current.get("metadata", {}), **execution_metadata},
             )
         except TimeoutError as exc:
