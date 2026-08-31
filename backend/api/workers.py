@@ -23,21 +23,27 @@ def _worker_record() -> dict[str, Any]:
             "port": WORKER_PORT,
             "status": "offline",
             "health": None,
+            "resources": None,
             "error": str(exc),
         }
+
+    resources = health.get("resources") if isinstance(health.get("resources"), dict) else None
+    worker_status = str(health.get("worker_status") or "unknown").lower()
     return {
         "worker_id": str(health.get("worker_id") or f"{WORKER_HOST}:{WORKER_PORT}"),
         "host": WORKER_HOST,
         "port": WORKER_PORT,
         "status": "online",
+        "worker_status": worker_status,
         "health": health,
+        "resources": resources,
         "error": None,
     }
 
 
 @router.get("/")
 def list_workers():
-    """Return the configured execution worker as a real monitoring record."""
+    """Return the configured execution worker with live resource telemetry."""
     return {"workers": [_worker_record()]}
 
 
