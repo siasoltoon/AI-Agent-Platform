@@ -59,5 +59,19 @@ class TerminalTool(BaseTool):
             except OSError as exc:
                 return {"stdout": "", "stderr": str(exc), "code": 1, "timed_out": False}
 
+        # ``mkdir`` is exposed as a terminal alias for compatibility, but
+        # directory creation is an idempotent workspace mutation. Implement
+        # it directly so an already-existing directory is a successful
+        # no-op instead of a shell error that can derail an otherwise valid
+        # agent task.
+        if executable == "mkdir":
+            parts = shlex.split(command, posix=True)
+            targets = [part for part in parts[1:] if part not in {"-p", "--parents"}]
+            if not targets:
+                raise ValueError("mkdir requires a directory path.")
+            for target in targets:
+                Path(target).mkdir(parents=True, exist_ok=True)
+            return {"stdout": "", "stderr": "", "code": 0, "timed_out": False}
+
         result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=timeout)
         return {"stdout": result.stdout, "stderr": result.stderr, "code": result.returncode, "timed_out": False}
