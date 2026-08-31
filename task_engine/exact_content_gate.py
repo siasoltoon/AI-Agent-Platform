@@ -12,7 +12,7 @@ _EXACT_MARKER_RE = re.compile(
     re.IGNORECASE,
 )
 _BOUNDARY_RE = re.compile(
-    r"\n\s*(?:after\s+creating|after\s+it|then\s+|do\s+not\b|please\s+|once\s+|when\s+finished|verification\s+rules?|constraints?:?)\b",
+    r"(?:\n\s*|\s+)(?:after\s+creating|after\s+it|then\s+(?:directly\s+)?(?:read|verify|check|confirm)|do\s+not\b|please\s+|once\s+|when\s+finished|verification\s+rules?|constraints?:?)\b",
     re.IGNORECASE,
 )
 
