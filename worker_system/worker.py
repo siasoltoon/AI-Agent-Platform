@@ -11,7 +11,8 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
-from agent_core.execution_agent import AgentExecutionError, AgentExecutor
+from agent_core.execution_agent import AgentExecutionError
+from agent_core.reliable_executor import ReliableAgentExecutor
 from backend.services.ollama_service import OllamaService
 from config.worker_config import DEFAULT_MODEL, OLLAMA_HOST, WORKER_TIMEOUT
 
@@ -22,7 +23,7 @@ MAX_TASK_ID_CHARS = 128
 MAX_MODEL_CHARS = 128
 MAX_TIMEOUT_SECONDS = 1800
 MAX_METADATA_KEYS = 64
-MAX_AGENT_STEPS = 32
+MAX_AGENT_STEPS = 64
 
 
 class ExecuteRequest(BaseModel):
@@ -93,23 +94,34 @@ class Worker:
                 raise ValueError(f"Task metadata cannot contain more than {MAX_METADATA_KEYS} keys.")
             workspace = metadata.get("workspace")
 
-            # Keep the runtime default aligned with the worker's published contract.
-            # Callers may request a smaller bounded budget, but omission must not
-            # silently downgrade the execution contract to a different default.
             requested_steps = int(metadata.get("max_agent_steps", MAX_AGENT_STEPS))
             if requested_steps < 1 or requested_steps > MAX_AGENT_STEPS:
                 raise ValueError(f"max_agent_steps must be between 1 and {MAX_AGENT_STEPS}.")
 
-            logger.info("Executing task_id=%s model=%s prompt_length=%s timeout=%s mode=agentic max_agent_steps=%s", job.get("task_id"), model, len(prompt), timeout, requested_steps)
+            logger.info(
+                "Executing task_id=%s model=%s prompt_length=%s timeout=%s mode=agentic-reliable max_agent_steps=%s",
+                job.get("task_id"), model, len(prompt), timeout, requested_steps,
+            )
             service = OllamaService(base_url=OLLAMA_HOST, model=model, timeout=timeout)
-            executor = AgentExecutor(service, workspace_root=workspace, max_steps=requested_steps)
+            executor = ReliableAgentExecutor(
+                service,
+                workspace_root=workspace,
+                max_steps=requested_steps,
+                max_attempts=4,
+            )
             result = executor.execute(prompt)
 
             if result.get("status") != "completed" or not result.get("execution_evidence", {}).get("verified", False):
                 raise AgentExecutionError("Agent execution completed without verified execution evidence.")
 
             self.last_completed_at = time.time()
-            return {"status": "completed", "worker_id": self.worker_id, "task_id": job.get("task_id"), "model": model, "result": result}
+            return {
+                "status": "completed",
+                "worker_id": self.worker_id,
+                "task_id": job.get("task_id"),
+                "model": model,
+                "result": result,
+            }
         except Exception as exc:
             self.last_error = str(exc)
             raise
@@ -120,7 +132,7 @@ class Worker:
 
 
 worker = Worker("pc-worker-01")
-app = FastAPI(title="AI Agent Platform Worker", version="0.5.0")
+app = FastAPI(title="AI Agent Platform Worker", version="0.6.0")
 
 
 @app.get("/health")
@@ -131,9 +143,10 @@ def health() -> dict[str, Any]:
         "worker_status": worker.status,
         "ollama": OLLAMA_HOST,
         "model": DEFAULT_MODEL,
-        "execution_mode": "agentic",
+        "execution_mode": "agentic-reliable",
         "max_timeout_seconds": MAX_TIMEOUT_SECONDS,
         "max_agent_steps": MAX_AGENT_STEPS,
+        "self_repair_attempts": ReliableAgentExecutor.MAX_ATTEMPTS,
         "last_completed_at": worker.last_completed_at,
         "last_error": worker.last_error,
     }
