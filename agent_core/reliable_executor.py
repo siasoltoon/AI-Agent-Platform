@@ -59,7 +59,7 @@ class ReliableAgentExecutor:
         lower = prompt.lower()
         return {
             "tests": bool(re.search(r"\b(test|tests|pytest|test suite|automated tests)\b", lower)),
-            "build": bool(re.search(r"\b(build|compile|compilation)\b", lower)),
+            "build": bool(re.search(r"\b(build (?:the|this|project|application|frontend|backend|artifact)|compile|compilation|npm run build)\b", lower)),
             "inspect": bool(re.search(r"\b(inspect|review|audit)\b", lower)),
             "verify": bool(re.search(r"\b(verify|verification|validate|validation|check)\b", lower)),
             "documentation": "readme" in lower or "documentation" in lower,
