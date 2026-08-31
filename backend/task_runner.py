@@ -8,6 +8,7 @@ import threading
 import time
 
 from task_engine.contracts import TaskRequest, TaskStatus
+from task_engine.exact_content_gate import verify_exact_content
 
 
 class TaskRunner:
@@ -163,13 +164,7 @@ class TaskRunner:
 
     @classmethod
     def _scope_satisfies_task(cls, prompt: str, result: dict) -> tuple[bool, dict]:
-        """Validate mutation records against an explicitly restricted task scope.
-
-        This is intentionally a conservative completion gate: for tasks that say
-        not to modify anything else, every recorded mutation must target a path
-        explicitly named by the task. A terminal mutation is also rejected when
-        its command cannot be safely scoped to a named path.
-        """
+        """Validate mutation records against an explicitly restricted task scope."""
         requested = cls._requested_paths(prompt)
         if not cls._scope_restricted(prompt):
             return True, {"scope_verified": False, "scope_restricted": False, "unexpected_paths": []}
@@ -261,6 +256,11 @@ class TaskRunner:
                 raise RuntimeError("Task execution completed without verified execution evidence.")
             if not self._evidence_satisfies_task(record["prompt"], evidence):
                 raise RuntimeError("Task execution completed with evidence that does not prove the requested file state.")
+
+            exact_evidence = verify_exact_content(record["prompt"], evidence)
+            evidence = {**evidence, **exact_evidence}
+            if exact_evidence.get("exact_content_required") and exact_evidence.get("exact_content_verified") is not True:
+                raise RuntimeError("Task execution completed without proving the requested exact content.")
 
             scope_ok, scope_evidence = self._scope_satisfies_task(record["prompt"], result if isinstance(result, dict) else {})
             if not scope_ok:
