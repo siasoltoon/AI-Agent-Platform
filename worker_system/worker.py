@@ -93,11 +93,14 @@ class Worker:
                 raise ValueError(f"Task metadata cannot contain more than {MAX_METADATA_KEYS} keys.")
             workspace = metadata.get("workspace")
 
-            requested_steps = int(metadata.get("max_agent_steps", 12))
+            # Keep the runtime default aligned with the worker's published contract.
+            # Callers may request a smaller bounded budget, but omission must not
+            # silently downgrade the execution contract to a different default.
+            requested_steps = int(metadata.get("max_agent_steps", MAX_AGENT_STEPS))
             if requested_steps < 1 or requested_steps > MAX_AGENT_STEPS:
                 raise ValueError(f"max_agent_steps must be between 1 and {MAX_AGENT_STEPS}.")
 
-            logger.info("Executing task_id=%s model=%s prompt_length=%s timeout=%s mode=agentic", job.get("task_id"), model, len(prompt), timeout)
+            logger.info("Executing task_id=%s model=%s prompt_length=%s timeout=%s mode=agentic max_agent_steps=%s", job.get("task_id"), model, len(prompt), timeout, requested_steps)
             service = OllamaService(base_url=OLLAMA_HOST, model=model, timeout=timeout)
             executor = AgentExecutor(service, workspace_root=workspace, max_steps=requested_steps)
             result = executor.execute(prompt)
