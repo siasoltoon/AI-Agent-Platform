@@ -45,7 +45,7 @@ def test_runtime_uses_bounded_timeout_for_normal_task():
 
     assert result["execution_mode"] == "agentic"
     assert worker.calls[0][1] == 30
-    assert worker.calls[0][0]["metadata"]["max_agent_steps"] == 12
+    assert worker.calls[0][0]["metadata"]["max_agent_steps"] == 32
 
 
 def test_runtime_promotes_large_missions_to_one_real_agentic_execution():
