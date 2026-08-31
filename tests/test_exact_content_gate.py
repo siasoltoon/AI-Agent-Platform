@@ -2,21 +2,10 @@
 
 from pathlib import Path
 
-from agent_core.execution_agent import AgentExecutor
 from backend.storage.task_store import TaskStore
 from backend.task_runner import TaskRunner
 from task_engine.contracts import TaskStatus
 from task_engine.exact_content_gate import extract_exact_content_requirements, verify_exact_content
-
-
-class FakeOllama:
-    timeout = 10
-
-    def __init__(self, responses):
-        self.responses = iter(responses)
-
-    def generate(self, prompt, timeout=None):
-        return {"response": next(self.responses)}
 
 
 class Router:
@@ -54,7 +43,7 @@ def test_extracts_multiline_exact_content_from_task():
 
 def test_exact_gate_rejects_content_that_only_matches_the_agent_write():
     prompt = "Create agent-test.txt. The file must contain exactly: expected-content. Then read it."
-    evidence = _evidence("agent-test.txt", "wrong-content", "wrong-content")
+    evidence = _evidence("agent-test.txt", "wrong-content.", "wrong-content.")
     result = verify_exact_content(prompt, evidence)
     assert result["exact_content_required"] is True
     assert result["exact_content_verified"] is False
@@ -63,15 +52,15 @@ def test_exact_gate_rejects_content_that_only_matches_the_agent_write():
 
 def test_exact_gate_requires_direct_read_to_match_requested_content():
     prompt = "Create agent-test.txt with exactly: expected-content. Then read it."
-    evidence = _evidence("agent-test.txt", "expected-content", "tampered")
+    evidence = _evidence("agent-test.txt", "expected-content.", "tampered.")
     result = verify_exact_content(prompt, evidence)
     assert result["exact_content_verified"] is False
-    assert "requested_content_differs_from_read:agent-test.txt" in result["exact_content_blockers"]
+    assert "read_content_not_verified:agent-test.txt" in result["exact_content_blockers"]
 
 
 def test_exact_gate_accepts_requested_write_and_direct_read_match():
     prompt = "Create agent-test.txt with exactly: expected-content. Then read it."
-    evidence = _evidence("agent-test.txt", "expected-content", "expected-content")
+    evidence = _evidence("agent-test.txt", "expected-content.", "expected-content.")
     result = verify_exact_content(prompt, evidence)
     assert result["exact_content_verified"] is True
     assert result["exact_content_blockers"] == []
