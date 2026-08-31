@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import threading
 import time
 
@@ -80,6 +81,43 @@ class TaskRunner:
                 return evidence
         return None
 
+    @staticmethod
+    def _evidence_satisfies_task(prompt: str, evidence: dict) -> bool:
+        """Require evidence to prove the observable object named by a file task."""
+        checks = evidence.get("checks")
+        if not isinstance(checks, list):
+            return False
+
+        # A generic successful action is not enough for a task that explicitly
+        # names a file. The evidence must mention that requested file.
+        file_mentions = re.findall(
+            r"(?<![\w/])(?:[\w.-]+/)*[\w.-]+\.[A-Za-z0-9]{1,12}(?![\w])",
+            str(prompt),
+        )
+        if not file_mentions:
+            return True
+
+        normalized_mentions = {PathLike.lower() for PathLike in file_mentions}
+        observable_types = {"file_exists", "read_verified_exists", "file_content_matches_write", "file_content_readable"}
+        matching = []
+        for check in checks:
+            if not isinstance(check, dict) or check.get("type") not in observable_types:
+                continue
+            path = str(check.get("path", "")).replace("\\", "/").lower()
+            if any(path == mention or path.endswith("/" + mention) for mention in normalized_mentions):
+                matching.append(check)
+
+        if not matching or not all(check.get("passed") is True for check in matching):
+            return False
+
+        lower = str(prompt).lower()
+        if "exactly" in lower and not any(
+            check.get("type") == "file_content_matches_write" and check.get("passed") is True
+            for check in matching
+        ):
+            return False
+        return True
+
     def _fail_or_retry(self, task_id: str, record: dict, error: str) -> None:
         if self.store.is_cancelled(task_id):
             return
@@ -120,6 +158,8 @@ class TaskRunner:
             evidence = self._execution_evidence(result) if isinstance(result, dict) else None
             if not isinstance(evidence, dict) or evidence.get("verified") is not True:
                 raise RuntimeError("Task execution completed without verified execution evidence.")
+            if not self._evidence_satisfies_task(record["prompt"], evidence):
+                raise RuntimeError("Task execution completed with evidence that does not prove the requested file state.")
 
             current = self.store.get(task_id) or record
             execution_metadata = {
