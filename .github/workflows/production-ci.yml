@@ -7,10 +7,12 @@ on:
       - feature/task-contract-v1
       - feature/dashboard-production-v2
       - feature/final-platform-hardening
+      - feature/final-agent-hardening
   pull_request:
     branches:
       - main
       - feature/final-platform-hardening
+      - feature/final-agent-hardening
 
 jobs:
   backend:
