@@ -7,8 +7,14 @@ from agent_core.execution_agent import AgentExecutionError, AgentExecutor
 
 class FakeOllama:
     timeout = 10
-    def __init__(self, responses): self.responses = iter(responses)
-    def generate(self, prompt, timeout=None): return {"response": next(self.responses)}
+
+    def __init__(self, responses):
+        self.responses = iter(responses)
+        self.prompts = []
+
+    def generate(self, prompt, timeout=None):
+        self.prompts.append(prompt)
+        return {"response": next(self.responses)}
 
 
 def test_agent_executor_writes_and_verifies_real_file(tmp_path: Path):
@@ -46,6 +52,44 @@ def test_agent_executor_requires_read_for_explicit_verification(tmp_path: Path):
     assert result["status"] == "completed"
     assert result["steps"][1]["verification"]["verified"] is False
     assert any(c["type"] == "file_content_matches_write" and c["passed"] for c in result["execution_evidence"]["checks"])
+    assert "MANDATORY EXACT-CONTENT VERIFICATION PROTOCOL" in ollama.prompts[0]
+    assert "MUST now call read_file" in ollama.prompts[1]
+
+
+def test_agent_executor_requires_read_after_write_even_when_model_tries_done(tmp_path: Path):
+    ollama = FakeOllama([
+        '{"action":"write_file","args":{"path":"agent-evidence.txt","content":"exact"}}',
+        '{"action":"done","summary":"Finished"}',
+        '{"action":"read_file","args":{"path":"agent-evidence.txt"}}',
+        '{"action":"done","summary":"Created, read, and verified exact content"}',
+    ])
+    result = AgentExecutor(ollama, workspace_root=str(tmp_path), max_steps=4).execute(
+        "Create agent-evidence.txt with exactly: exact. Then verify by reading it and confirming the exact content."
+    )
+    assert result["status"] == "completed"
+    assert [record["tool"] for record in result["tool_records"]] == ["write_file", "read_file"]
+    assert any(
+        check["type"] == "read_content_matches_write"
+        and check["path"] == "agent-evidence.txt"
+        and check["passed"] is True
+        for check in result["execution_evidence"]["checks"]
+    )
+
+
+def test_agent_executor_recovers_from_read_content_mismatch(tmp_path: Path):
+    ollama = FakeOllama([
+        '{"action":"write_file","args":{"path":"recover.txt","content":"expected"}}',
+        '{"action":"read_file","args":{"path":"recover.txt"}}',
+        '{"action":"done","summary":"Done"}',
+        '{"action":"write_file","args":{"path":"recover.txt","content":"expected"}}',
+        '{"action":"read_file","args":{"path":"recover.txt"}}',
+        '{"action":"done","summary":"Recovered and verified"}',
+    ])
+    result = AgentExecutor(ollama, workspace_root=str(tmp_path), max_steps=6).execute(
+        "Create recover.txt with exactly: expected. Verify by reading it and checking the exact content."
+    )
+    assert result["status"] == "completed"
+    assert result["execution_evidence"]["verified"] is True
 
 
 def test_agent_executor_supports_directory_and_search_tools(tmp_path: Path):

@@ -34,10 +34,24 @@ The current architecture keeps heavy agent execution on the configured PC worker
 
 ## Validation
 
-Run the full test suite before deployment:
+Run the deterministic production gate from the repository root:
+
+```text
+python scripts/production_gate.py
+```
+
+Run the full test suite explicitly when needed:
 
 ```text
 python -m pytest -q
 ```
 
-Also compile the production execution modules with `python -m py_compile` as documented in `docs/FINAL_PRODUCTION_AUDIT.md`.
+Build the frontend using the script declared by `dashboard/frontend/package.json`:
+
+```text
+cd dashboard/frontend
+npm install
+npm run build
+```
+
+The repository gate intentionally does not claim live PC-worker/Ollama execution. That environment-dependent acceptance test must be performed after synchronizing the exact hardening branch to the PC.

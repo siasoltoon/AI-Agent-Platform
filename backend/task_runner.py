@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import threading
 import time
 
@@ -64,6 +65,160 @@ class TaskRunner:
         except (TypeError, ValueError):
             return 0
 
+    @staticmethod
+    def _execution_evidence(result: dict) -> dict | None:
+        """Extract the canonical agent evidence through the runtime/worker envelope."""
+        candidates = [result]
+        nested = result.get("result")
+        if isinstance(nested, dict):
+            candidates.append(nested)
+            nested_result = nested.get("result")
+            if isinstance(nested_result, dict):
+                candidates.append(nested_result)
+        for candidate in candidates:
+            evidence = candidate.get("execution_evidence")
+            if isinstance(evidence, dict):
+                return evidence
+        return None
+
+    @staticmethod
+    def _tool_records(result: dict) -> list[dict]:
+        """Extract canonical tool records from the runtime/worker envelope."""
+        candidates = [result]
+        nested = result.get("result")
+        if isinstance(nested, dict):
+            candidates.append(nested)
+            nested_result = nested.get("result")
+            if isinstance(nested_result, dict):
+                candidates.append(nested_result)
+        for candidate in candidates:
+            records = candidate.get("tool_records")
+            if isinstance(records, list):
+                return [record for record in records if isinstance(record, dict)]
+        return []
+
+    @staticmethod
+    def _evidence_satisfies_task(prompt: str, evidence: dict) -> bool:
+        """Require evidence to prove the observable object named by a file task."""
+        checks = evidence.get("checks")
+        if not isinstance(checks, list):
+            return False
+
+        file_mentions = re.findall(
+            r"(?<![\w/])(?:[\w.-]+/)*[\w.-]+\.[A-Za-z0-9]{1,12}(?![\w])",
+            str(prompt),
+        )
+        if not file_mentions:
+            return True
+
+        normalized_mentions = {path.lower() for path in file_mentions}
+        observable_types = {"file_exists", "read_verified_exists", "file_content_matches_write", "file_content_readable"}
+        matching = []
+        for check in checks:
+            if not isinstance(check, dict) or check.get("type") not in observable_types:
+                continue
+            path = str(check.get("path", "")).replace("\\", "/").lower()
+            if any(path == mention or path.endswith("/" + mention) for mention in normalized_mentions):
+                matching.append(check)
+
+        if not matching or not all(check.get("passed") is True for check in matching):
+            return False
+
+        lower = str(prompt).lower()
+        if "exactly" in lower and not any(
+            check.get("type") == "file_content_matches_write" and check.get("passed") is True
+            for check in matching
+        ):
+            return False
+        return True
+
+    @staticmethod
+    def _scope_restricted(prompt: str) -> bool:
+        """Detect tasks that explicitly forbid unrelated workspace side effects."""
+        lower = str(prompt).lower()
+        patterns = (
+            "do not modify or delete any other",
+            "do not modify any other",
+            "do not delete any other",
+            "do not change any other",
+            "do not modify/delete any other",
+            "do not modify anything else",
+            "do not delete anything else",
+            "do not change anything else",
+            "nothing else",
+            "no other files",
+            "no other file",
+            "without modifying anything else",
+            "without changing anything else",
+        )
+        return any(pattern in lower for pattern in patterns)
+
+    @staticmethod
+    def _requested_paths(prompt: str) -> set[str]:
+        mentions = re.findall(
+            r"(?<![\w/])(?:[\w.-]+/)*[\w.-]+\.[A-Za-z0-9]{1,12}(?![\w])",
+            str(prompt),
+        )
+        return {path.replace("\\", "/").lower().lstrip("./") for path in mentions}
+
+    @classmethod
+    def _scope_satisfies_task(cls, prompt: str, result: dict) -> tuple[bool, dict]:
+        """Validate mutation records against an explicitly restricted task scope.
+
+        This is intentionally a conservative completion gate: for tasks that say
+        not to modify anything else, every recorded mutation must target a path
+        explicitly named by the task. A terminal mutation is also rejected when
+        its command cannot be safely scoped to a named path.
+        """
+        requested = cls._requested_paths(prompt)
+        if not cls._scope_restricted(prompt):
+            return True, {"scope_verified": False, "scope_restricted": False, "unexpected_paths": []}
+
+        records = cls._tool_records(result)
+        mutations: list[str] = []
+        unscoped_terminal: list[str] = []
+
+        def add_path(value: object) -> None:
+            if value is None:
+                return
+            path = str(value).replace("\\", "/").strip().lower().lstrip("./")
+            if path:
+                mutations.append(path)
+
+        for record in records:
+            if record.get("ok") is not True:
+                continue
+            tool = str(record.get("tool", "")).lower()
+            payload = record.get("result")
+            payload = payload if isinstance(payload, dict) else {}
+            if tool == "write_file":
+                add_path(payload.get("path"))
+            elif tool == "make_directory":
+                add_path(payload.get("path"))
+            elif tool in {"copy_file", "move_file"}:
+                add_path(payload.get("source"))
+                add_path(payload.get("destination"))
+            elif tool == "delete_file":
+                add_path(payload.get("path"))
+            elif tool in {"terminal", "mkdir", "mktemp", "echo"}:
+                command = str(payload.get("command", "")).strip()
+                first = command.split(maxsplit=1)[0].lower() if command else tool
+                if first in {"mkdir", "md"}:
+                    add_path(command.split(maxsplit=1)[1] if len(command.split(maxsplit=1)) > 1 else "")
+                elif re.search(r"(?:>|>>|del(?:ete)?\s+|erase\s+|move\s+|copy\s+)", command, re.IGNORECASE):
+                    unscoped_terminal.append(command)
+
+        unexpected = sorted({path for path in mutations if path not in requested})
+        scope_verified = not unexpected and not unscoped_terminal and bool(requested)
+        return scope_verified, {
+            "scope_verified": scope_verified,
+            "scope_restricted": True,
+            "requested_paths": sorted(requested),
+            "mutation_paths": sorted(set(mutations)),
+            "unexpected_paths": unexpected,
+            "unscoped_terminal_commands": unscoped_terminal,
+        }
+
     def _fail_or_retry(self, task_id: str, record: dict, error: str) -> None:
         if self.store.is_cancelled(task_id):
             return
@@ -101,11 +256,24 @@ class TaskRunner:
             if self.store.is_cancelled(task_id):
                 return
 
+            evidence = self._execution_evidence(result) if isinstance(result, dict) else None
+            if not isinstance(evidence, dict) or evidence.get("verified") is not True:
+                raise RuntimeError("Task execution completed without verified execution evidence.")
+            if not self._evidence_satisfies_task(record["prompt"], evidence):
+                raise RuntimeError("Task execution completed with evidence that does not prove the requested file state.")
+
+            scope_ok, scope_evidence = self._scope_satisfies_task(record["prompt"], result if isinstance(result, dict) else {})
+            if not scope_ok:
+                evidence = {**evidence, **scope_evidence}
+                raise RuntimeError("Task execution completed with unauthorized workspace side effects.")
+            evidence = {**evidence, **scope_evidence}
+
             current = self.store.get(task_id) or record
             execution_metadata = {
                 "execution_mode": result.get("execution_mode", "agentic"),
                 "duration_seconds": round(time.time() - started, 3),
                 "retry_count": self._retry_count(current.get("metadata", {})),
+                "execution_evidence": evidence,
             }
             nested = result.get("result")
             if isinstance(nested, dict):
@@ -113,11 +281,16 @@ class TaskRunner:
                     "steps": nested.get("steps", 1),
                     "orchestration_mode": nested.get("mode", "agentic"),
                 })
+                nested_result = nested.get("result")
+                if isinstance(nested_result, dict):
+                    execution_metadata["steps"] = nested_result.get("steps", execution_metadata["steps"])
+                    execution_metadata["orchestration_mode"] = nested_result.get("mode", execution_metadata["orchestration_mode"])
             self.store.update(
                 task_id,
                 status=TaskStatus.COMPLETED.value,
                 completed_at=time.time(),
                 result=result,
+                error=None,
                 metadata={**current.get("metadata", {}), **execution_metadata},
             )
         except TimeoutError as exc:

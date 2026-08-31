@@ -1,28 +1,15 @@
-"""Agent runtime boundary for real PC-worker execution.
-
-Large missions stay on the same real agentic execution path as normal tasks.
-The runtime only selects safe execution limits; it never turns a coding task
-into text-only planning calls that bypass the worker's evidence contract.
-"""
+"""Agent runtime boundary for real PC-worker execution."""
 
 from __future__ import annotations
 
 from typing import Any
 
 from backend.services.worker_client import WorkerClient
-from config.worker_config import (
-    DEFAULT_MODEL,
-    LARGE_TASK_THRESHOLD,
-    LARGE_TASK_TIMEOUT,
-    WORKER_HOST,
-    WORKER_PORT,
-    WORKER_TIMEOUT,
-)
-
+from config.worker_config import DEFAULT_MODEL, LARGE_TASK_THRESHOLD, LARGE_TASK_TIMEOUT, WORKER_HOST, WORKER_PORT, WORKER_TIMEOUT
 
 MAX_RUNTIME_TIMEOUT = 1800
 DEFAULT_LARGE_AGENT_STEPS = 32
-DEFAULT_NORMAL_AGENT_STEPS = 12
+DEFAULT_NORMAL_AGENT_STEPS = 32
 
 
 class AgentRuntime:
@@ -41,7 +28,6 @@ class AgentRuntime:
 
     @staticmethod
     def _validate_worker_result(response: dict[str, Any]) -> None:
-        """Reject false-positive worker responses before a task can be completed."""
         if not isinstance(response, dict):
             raise RuntimeError("Worker returned an invalid execution response without verified execution evidence.")
         if response.get("status") != "completed":
@@ -53,38 +39,21 @@ class AgentRuntime:
         if not isinstance(evidence, dict) or evidence.get("verified") is not True:
             raise RuntimeError("Worker reported completion without verified execution evidence.")
         tool_records = result.get("tool_records")
-        if not isinstance(tool_records, list) or not any(
-            isinstance(record, dict) and record.get("ok") is True for record in tool_records
-        ):
+        if not isinstance(tool_records, list) or not any(isinstance(record, dict) and record.get("ok") is True for record in tool_records):
             raise RuntimeError("Worker reported completion without a successful tool action.")
 
-    def execute(
-        self,
-        prompt: str,
-        model: str | None = None,
-        task_id: str | None = None,
-        timeout_seconds: int | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Execute the task through the real agentic PC-worker path."""
+    def execute(self, prompt: str, model: str | None = None, task_id: str | None = None,
+                timeout_seconds: int | None = None, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
         if not prompt or not prompt.strip():
             raise ValueError("Task prompt cannot be empty.")
-
         prompt = prompt.strip()
         selected_model = (model or self.default_model).strip()
         if not selected_model:
             raise ValueError("Model identifier cannot be empty.")
 
         is_large = len(prompt) >= self.large_task_threshold
-        selected_timeout = self._bounded_timeout(
-            int(timeout_seconds) if timeout_seconds is not None
-            else int(self.large_task_timeout if is_large else self.timeout)
-        )
-
+        selected_timeout = self._bounded_timeout(int(timeout_seconds) if timeout_seconds is not None else int(self.large_task_timeout if is_large else self.timeout))
         execution_metadata = dict(metadata or {})
-        # Large missions need the full bounded agent budget, but still use one
-        # worker execution so tool calls, observations and evidence stay in one
-        # authoritative trace. Caller metadata may lower the budget, never raise it.
         configured_steps = execution_metadata.get("max_agent_steps")
         if configured_steps is None:
             configured_steps = DEFAULT_LARGE_AGENT_STEPS if is_large else DEFAULT_NORMAL_AGENT_STEPS
@@ -98,22 +67,10 @@ class AgentRuntime:
         execution_metadata["max_agent_steps"] = requested_steps
         execution_metadata["execution_profile"] = "large" if is_large else "normal"
 
-        payload = {
-            "task_id": task_id,
-            "prompt": prompt,
-            "model": selected_model,
-            "timeout": selected_timeout,
-            "metadata": execution_metadata,
-        }
+        payload = {"task_id": task_id, "prompt": prompt, "model": selected_model, "timeout": selected_timeout, "metadata": execution_metadata}
         result = self.worker_client.execute_task(payload, timeout=selected_timeout)
         self._validate_worker_result(result)
-
-        return {
-            "task_id": task_id,
-            "model": selected_model,
-            "execution_mode": "agentic_large" if is_large else "agentic",
-            "result": result,
-        }
+        return {"task_id": task_id, "model": selected_model, "execution_mode": "agentic_large" if is_large else "agentic", "result": result}
 
     def health_check(self) -> dict[str, Any]:
         return self.worker_client.health_check()
