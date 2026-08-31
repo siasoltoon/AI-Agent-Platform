@@ -11,7 +11,7 @@ class FakeRouter:
             "execution_mode": "agentic",
             "result": {
                 "status": "completed",
-                "execution_evidence": {"verified": True, "checks": [{"type": "smoke", "passed": True}]},
+                "execution_evidence": {"verified": True, "checks": [{"type": "file_exists", "path": "hello.txt", "passed": True}]},
                 "tool_records": [{"ok": True, "tool": "write_file"}],
                 "steps": 2,
             },
@@ -24,11 +24,11 @@ class FakeRouter:
         return self.result
 
 
-def seed(store, task_id="task-1"):
+def seed(store, task_id="task-1", prompt="Create hello.txt"):
     store.create(
         {
             "id": task_id,
-            "prompt": "Create hello.txt",
+            "prompt": prompt,
             "model": None,
             "status": TaskStatus.QUEUED.value,
             "created_at": time.time(),
@@ -84,6 +84,49 @@ def test_runner_rejects_completion_without_verified_evidence(tmp_path):
 
     assert task["status"] == TaskStatus.FAILED.value
     assert "verified execution evidence" in task["error"]
+
+
+def test_runner_rejects_verified_but_irrelevant_file_evidence(tmp_path):
+    store = TaskStore(tmp_path / "tasks.db")
+    seed(store, prompt="Create requested.txt")
+    result = {
+        "execution_mode": "agentic",
+        "result": {
+            "status": "completed",
+            "execution_evidence": {"verified": True, "checks": [{"type": "file_exists", "path": "other.txt", "passed": True}]},
+            "tool_records": [{"ok": True, "tool": "write_file"}],
+        },
+    }
+    runner = TaskRunner(store, FakeRouter(result=result))
+    runner.start()
+    try:
+        task = wait_for_terminal(store, "task-1")
+    finally:
+        runner.stop()
+
+    assert task["status"] == TaskStatus.FAILED.value
+    assert "does not prove the requested file state" in task["error"]
+
+
+def test_runner_requires_exact_content_evidence_for_exact_file_task(tmp_path):
+    store = TaskStore(tmp_path / "tasks.db")
+    seed(store, prompt="Create exact.txt with exactly: expected")
+    result = {
+        "execution_mode": "agentic",
+        "result": {
+            "status": "completed",
+            "execution_evidence": {"verified": True, "checks": [{"type": "file_exists", "path": "exact.txt", "passed": True}]},
+            "tool_records": [{"ok": True, "tool": "write_file"}],
+        },
+    }
+    runner = TaskRunner(store, FakeRouter(result=result))
+    runner.start()
+    try:
+        task = wait_for_terminal(store, "task-1")
+    finally:
+        runner.stop()
+
+    assert task["status"] == TaskStatus.FAILED.value
 
 
 def test_runner_persists_execution_failure(tmp_path):
