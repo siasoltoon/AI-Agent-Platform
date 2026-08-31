@@ -12,5 +12,59 @@
   <div id="app"></div>
   <noscript>برای استفاده از داشبورد باید JavaScript را فعال کنید.</noscript>
   <script src="/dashboard/app.js" defer></script>
+  <script defer>
+    (() => {
+      "use strict";
+
+      const escapeHtml = (value) => String(value ?? "").replace(/[&<>\"']/g, (c) => ({
+        "&":"&amp;", "<":"&lt;", ">":"&gt;", "\"":"&quot;", "'":"&#39;"
+      }[c]));
+      const percent = (value) => Number.isFinite(Number(value)) ? `${Number(value).toFixed(1)}%` : "N/A";
+      const state = { workers: null, updated: null, error: null };
+
+      function cardHtml() {
+        const workers = Array.isArray(state.workers?.workers) ? state.workers.workers : [];
+        if (!workers.length) {
+          return `<section class="card" id="live-worker-health"><div class="card-head"><h2>Worker health</h2><span>live telemetry</span></div><div class="card-body"><div class="notice"><strong>Worker unavailable</strong>Live CPU, RAM and GPU telemetry will appear automatically when the configured worker is reachable.</div></div></section>`;
+        }
+        return `<section class="card" id="live-worker-health" style="margin-bottom:16px"><div class="card-head"><h2>Worker health</h2><span>live telemetry · ${state.updated ? new Date(state.updated).toLocaleTimeString() : "connecting…"}</span></div><div class="card-body"><div class="health-grid">${workers.map((w) => {
+          const r = w.resources || {};
+          const status = String(w.worker_status || w.status || "unknown").toUpperCase();
+          return `<div class="health-item"><strong>${escapeHtml(w.worker_id || "Worker")} · ${escapeHtml(status)}</strong><span>CPU <b>${percent(r.cpu_percent)}</b> · RAM <b>${percent(r.ram_percent)}</b> · GPU <b>${percent(r.gpu_percent)}</b></span></div>`;
+        }).join("")}</div></div></section>`;
+      }
+
+      function mount() {
+        const content = document.querySelector("#app .content");
+        if (!content) return;
+        const existing = document.getElementById("live-worker-health");
+        const html = cardHtml();
+        if (existing) {
+          existing.outerHTML = html;
+        } else {
+          content.insertAdjacentHTML("afterbegin", html);
+        }
+      }
+
+      async function poll() {
+        try {
+          const response = await fetch("/workers/", { cache: "no-store" });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          state.workers = await response.json();
+          state.updated = Date.now();
+          state.error = null;
+        } catch (error) {
+          state.error = error;
+          state.workers = null;
+        }
+        mount();
+      }
+
+      const observer = new MutationObserver(() => mount());
+      observer.observe(document.getElementById("app"), { childList: true, subtree: true });
+      poll();
+      window.setInterval(poll, 1000);
+    })();
+  </script>
 </body>
 </html>
