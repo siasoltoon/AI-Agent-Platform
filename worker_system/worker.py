@@ -26,6 +26,7 @@ MAX_TIMEOUT_SECONDS = 1800
 MAX_METADATA_KEYS = 64
 MAX_NORMAL_AGENT_STEPS = 32
 MAX_LARGE_AGENT_STEPS = 64
+# Published worker ceiling. Normal missions default to 32; large missions may use 64.
 MAX_AGENT_STEPS = MAX_LARGE_AGENT_STEPS
 
 # Compatibility injection point retained for the existing worker contract and
