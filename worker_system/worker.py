@@ -82,16 +82,6 @@ class Worker:
         self._completed_results: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._inflight_task_ids: set[str] = set()
 
-    def _cached_result(self, task_id: str | None) -> dict[str, Any] | None:
-        if not task_id:
-            return None
-        with self._idempotency_lock:
-            cached = self._completed_results.get(task_id)
-            if cached is None:
-                return None
-            self._completed_results.move_to_end(task_id)
-            return copy.deepcopy(cached)
-
     def _claim_task_id(self, task_id: str | None) -> dict[str, Any] | None:
         if not task_id:
             return None
@@ -99,7 +89,9 @@ class Worker:
             cached = self._completed_results.get(task_id)
             if cached is not None:
                 self._completed_results.move_to_end(task_id)
-                return copy.deepcopy(cached)
+                replayed = copy.deepcopy(cached)
+                replayed["idempotency"] = {"key": task_id, "replayed": True}
+                return replayed
             if task_id in self._inflight_task_ids:
                 raise RuntimeError(f"Execution for task_id={task_id} is already in progress; duplicate execution rejected.")
             self._inflight_task_ids.add(task_id)
