@@ -22,14 +22,25 @@ def test_recovery_policy_distinguishes_failures():
 
 def test_acceptance_requires_all_gates():
     gate = MissionAcceptanceGate()
-    result = gate.evaluate(
+    completed = gate.evaluate(
+        mission_status="completed",
+        plan_complete=True,
+        tests_checked=True,
+        final_reviewed=True,
+        execution_result={"status": "completed", "execution_evidence": {"verified": True}, "tool_records": [{"ok": True}]},
+    )
+    assert completed.accepted
+
+    running = gate.evaluate(
         mission_status="running",
         plan_complete=True,
         tests_checked=True,
         final_reviewed=True,
         execution_result={"status": "completed", "execution_evidence": {"verified": True}, "tool_records": [{"ok": True}]},
     )
-    assert result.accepted
+    assert not running.accepted
+    assert "mission_completed" in running.reasons
+
     blocked = gate.evaluate(mission_status="running", plan_complete=True, tests_checked=False, final_reviewed=True, execution_result={})
     assert not blocked.accepted
     assert "tests_checked" in blocked.reasons
