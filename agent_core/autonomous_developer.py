@@ -87,6 +87,27 @@ class AutonomousDeveloper:
                 return payload.get("code") == 0
         return False
 
+    def cancel(self, mission_id: str) -> dict[str, Any]:
+        """Durably request cancellation; an active run cooperatively stops at its next safe boundary."""
+        if not mission_id.strip():
+            raise ValueError("mission_id is required")
+        memory = self.memory_store.load(mission_id)
+        if memory is None:
+            raise ValueError(f"Unknown mission: {mission_id}")
+        if memory.status == "completed":
+            return {"mission_id": mission_id, "status": "completed", "cancelled": False, "memory": memory.snapshot()}
+        if memory.status == "cancelled":
+            return {"mission_id": mission_id, "status": "cancelled", "cancelled": True, "memory": memory.snapshot()}
+        memory.transition("cancelled")
+        self.memory_store.save(memory)
+        return {"mission_id": mission_id, "status": "cancelled", "cancelled": True, "memory": memory.snapshot()}
+
+    def _cancelled_snapshot(self, mission_id: str) -> dict[str, Any] | None:
+        latest = self.memory_store.load(mission_id)
+        if latest is not None and latest.status == "cancelled":
+            return {"mission_id": mission_id, "status": "cancelled", "cancelled": True, "memory": latest.snapshot()}
+        return None
+
     def _recover(
         self,
         graph: TaskGraph,
@@ -138,6 +159,9 @@ class AutonomousDeveloper:
         self.memory_store.save(memory)
 
         while not graph.is_complete():
+            cancelled = self._cancelled_snapshot(mission_id)
+            if cancelled:
+                return cancelled
             ready = graph.ready()
             if not ready:
                 blockers = [task.task_id for task in graph.tasks.values() if task.status == "blocked"]
@@ -146,9 +170,15 @@ class AutonomousDeveloper:
                 return {"mission_id": mission_id, "status": "blocked", "blockers": blockers, "memory": memory.snapshot()}
 
             for task in list(ready):
+                cancelled = self._cancelled_snapshot(mission_id)
+                if cancelled:
+                    return cancelled
                 completed = False
                 starting_attempt = memory.task_attempts.get(task.task_id, 0)
                 for offset in range(1, retries + 1):
+                    cancelled = self._cancelled_snapshot(mission_id)
+                    if cancelled:
+                        return cancelled
                     attempt = starting_attempt + offset
                     task.attempts = attempt
                     memory.record_attempt(task.task_id, attempt)
