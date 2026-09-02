@@ -1,4 +1,5 @@
 import shutil
+import sys
 
 import pytest
 
@@ -45,3 +46,29 @@ def test_terminal_rejects_disallowed_executable():
 def test_terminal_rejects_invalid_timeout():
     with pytest.raises(ValueError, match="between 1 and 600"):
         TerminalTool().execute("python --version", timeout=0)
+
+
+def test_terminal_runs_commands_from_configured_workspace(tmp_path):
+    result = TerminalTool(workspace_root=tmp_path).execute("python -c \"import os; print(os.getcwd())\"", timeout=10)
+    assert result["code"] == 0
+    assert str(tmp_path).lower() in result["stdout"].strip().lower()
+
+
+def test_terminal_mkdir_cannot_escape_configured_workspace(tmp_path):
+    with pytest.raises(PermissionError, match="escapes the configured workspace"):
+        TerminalTool(workspace_root=tmp_path).execute("mkdir ..\\outside-agent-workspace")
+
+
+def test_terminal_timeout_returns_structured_observation():
+    python = sys.executable.replace("\\", "/")
+    result = TerminalTool().execute(f'"{python}" -c "import time; time.sleep(2)"', timeout=1)
+    assert result["code"] == 124
+    assert result["timed_out"] is True
+    assert result["timeout_seconds"] == 1
+
+
+def test_terminal_output_is_bounded():
+    result = TerminalTool().execute('python -c "print(\'x\' * 20000)"', timeout=10)
+    assert result["code"] == 0
+    assert len(result["stdout"]) <= TerminalTool.MAX_OUTPUT_CHARS + 64
+    assert "truncated" in result["stdout"]
