@@ -86,3 +86,33 @@ def test_task_store_releases_sqlite_file_handle(tmp_path):
 
     shutil.rmtree(tmp_path)
     assert not path.exists()
+
+
+def test_task_store_resumes_completed_task_with_same_identity(tmp_path):
+    store = TaskStore(tmp_path / "tasks.db")
+    _seed(store)
+    store.update("task-1", status=TaskStatus.RUNNING.value, started_at=2.0)
+    store.update("task-1", status=TaskStatus.COMPLETED.value, completed_at=3.0, result={"ok": True})
+
+    resumed = store.resume_completed("task-1")
+
+    assert resumed["id"] == "task-1"
+    assert resumed["status"] == TaskStatus.QUEUED.value
+    assert resumed["started_at"] is None
+    assert resumed["completed_at"] is None
+    assert resumed["error"] is None
+    assert resumed["result"] == {"ok": True}
+    assert resumed["metadata"]["resume_count"] == 1
+    assert resumed["metadata"]["resumed_from_status"] == "completed"
+    assert store.events("task-1")[-1]["event_type"] == "manual_resume_queued"
+
+
+def test_task_store_resume_completed_is_bounded_to_completed_state(tmp_path):
+    store = TaskStore(tmp_path / "tasks.db")
+    _seed(store)
+
+    for status in ("queued", "running", "failed", "cancelled"):
+        task_id = f"{status}-task"
+        _seed(store, task_id, status)
+        with pytest.raises(ValueError, match=f"Task is not resumable: {status}"):
+            store.resume_completed(task_id)
