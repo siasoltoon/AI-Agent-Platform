@@ -105,6 +105,71 @@ def test_agent_executor_recovers_from_read_content_mismatch(tmp_path: Path):
     assert result["execution_evidence"]["verified"] is True
 
 
+def test_agent_executor_supports_multiline_exact_content(tmp_path: Path):
+    code = '''class Calculator:
+    def add(self, a, b):
+        return a + b
+
+    def subtract(self, a, b):
+        return a - b
+
+    def multiply(self, a, b):
+        return a * b
+
+    def divide(self, a, b):
+        if b == 0:
+            raise ZeroDivisionError("Cannot divide by zero")
+        return a / b
+'''
+    ollama = FakeOllama([
+        '{"action":"write_file","args":{"path":"calculator_demo.py","content":' + __import__("json").dumps(code) + '}}',
+        '{"action":"read_file","args":{"path":"calculator_demo.py"}}',
+        '{"action":"done","summary":"Created and verified calculator_demo.py"}',
+    ])
+    result = AgentExecutor(ollama, workspace_root=str(tmp_path), max_steps=3).execute(
+        "Create calculator_demo.py exactly as requested and verify by reading it back and checking exact content."
+    )
+    assert result["status"] == "completed"
+    assert (tmp_path / "calculator_demo.py").read_text(encoding="utf-8") == code
+    assert result["execution_evidence"]["verified"] is True
+    assert any(
+        check["type"] == "read_content_matches_write"
+        and check["path"] == "calculator_demo.py"
+        and check["passed"] is True
+        for check in result["execution_evidence"]["checks"]
+    )
+
+
+def test_agent_executor_returns_verified_result_at_step_boundary(tmp_path: Path):
+    content = "line one\nline two\nline three\n"
+    ollama = FakeOllama([
+        '{"action":"write_file","args":{"path":"boundary.txt","content":' + __import__("json").dumps(content) + '}}',
+        '{"action":"read_file","args":{"path":"boundary.txt"}}',
+    ])
+    result = AgentExecutor(ollama, workspace_root=str(tmp_path), max_steps=2).execute(
+        "Create boundary.txt exactly and verify it by reading it back."
+    )
+    assert result["status"] == "completed"
+    assert result["execution_evidence"]["verified"] is True
+    assert (tmp_path / "boundary.txt").read_text(encoding="utf-8") == content
+
+
+def test_agent_executor_preserves_partial_result_on_execution_error(tmp_path: Path):
+    ollama = FakeOllama([
+        '{"action":"write_file","args":{"path":"partial.txt","content":"saved"}}',
+        '{"action":"read_file","args":{"path":"partial.txt"}}',
+        '{"action":"tool","tool":"unknown_tool","args":{}}',
+    ])
+    with pytest.raises(AgentExecutionError) as exc_info:
+        AgentExecutor(ollama, workspace_root=str(tmp_path), max_steps=3).execute(
+            "Create partial.txt exactly and verify it by reading it back."
+        )
+    partial = exc_info.value.partial_result
+    assert partial is not None
+    assert partial["execution_evidence"]["verified"] is True
+    assert [record["tool"] for record in partial["tool_records"]] == ["write_file", "read_file"]
+
+
 def test_agent_executor_supports_directory_and_search_tools(tmp_path: Path):
     ollama = FakeOllama([
         '{"action":"tool","tool":"make_directory","args":{"path":"agent-tool-test"}}',
