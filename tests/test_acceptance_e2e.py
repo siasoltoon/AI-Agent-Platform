@@ -16,6 +16,12 @@ class AcceptanceRouter:
         self.started = threading.Event()
         self.release = threading.Event()
 
+    def command_for(self, task):
+        command = task.metadata.get("command", "agent.execute")
+        if not isinstance(command, str) or not command.strip():
+            raise ValueError("Task command cannot be empty.")
+        return command.strip().lower()
+
     def route(self, task, *, task_id):
         self.started.set()
         if self.block:
