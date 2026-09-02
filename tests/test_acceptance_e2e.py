@@ -4,7 +4,7 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from backend import main, task_runner
+from backend import main
 from backend.api import tasks
 from backend.storage.task_store import TaskStore
 from task_engine.contracts import TaskStatus
@@ -32,11 +32,7 @@ class AcceptanceRouter:
                     ],
                 },
                 "tool_records": [
-                    {
-                        "ok": True,
-                        "tool": "write_file",
-                        "result": {"path": "acceptance.txt", "content": "accepted"},
-                    }
+                    {"ok": True, "tool": "write_file", "result": {"path": "acceptance.txt", "content": "accepted"}}
                 ],
                 "steps": 2,
             },
@@ -68,10 +64,7 @@ def test_full_acceptance_chain_api_queue_runner_evidence_persistence(isolated_ap
     with TestClient(main.app) as client:
         response = client.post(
             "/tasks/",
-            json={
-                "task_id": "acceptance-1",
-                "prompt": "Create acceptance.txt with exactly: accepted",
-            },
+            json={"task_id": "acceptance-1", "prompt": "Create acceptance.txt with exactly: accepted"},
         )
         assert response.status_code == 202
         assert response.json()["status"] == TaskStatus.QUEUED.value
@@ -89,7 +82,7 @@ def test_full_acceptance_chain_api_queue_runner_evidence_persistence(isolated_ap
     assert completed["error"] is None
 
 
-def test_acceptance_rejects_unverified_completion(isolated_app):
+def test_acceptance_rejects_unverified_completion(monkeypatch, isolated_app):
     store, _ = isolated_app
 
     class UnverifiedRouter(AcceptanceRouter):
@@ -103,13 +96,7 @@ def test_acceptance_rejects_unverified_completion(isolated_app):
                 },
             }
 
-    # The runner receives the router captured when the lifespan starts.
-    # Replace it before entering TestClient so the complete API path is exercised.
-    main_router = UnverifiedRouter()
-    # task_router is a module-level dependency used by the lifespan.
-    import backend.api.tasks as task_api
-    task_api.task_router = main_router
-
+    monkeypatch.setattr(tasks, "task_router", UnverifiedRouter())
     with TestClient(main.app) as client:
         response = client.post("/tasks/", json={"task_id": "reject-1", "prompt": "Create acceptance.txt"})
         assert response.status_code == 202
@@ -119,20 +106,13 @@ def test_acceptance_rejects_unverified_completion(isolated_app):
     assert "verified execution evidence" in task["error"]
 
 
-def test_cancellation_prevents_post_cancel_success(isolated_app):
-    store = TaskStore(isolated_app[0].db_path)
+def test_cancellation_prevents_post_cancel_success(monkeypatch, isolated_app):
+    store, _ = isolated_app
     router = AcceptanceRouter(block=True)
-
-    # Isolate this deterministic cancellation run from the fixture router.
-    import backend.api.tasks as task_api
-    task_api.TASK_STORE = store
-    task_api.task_router = router
+    monkeypatch.setattr(tasks, "task_router", router)
 
     with TestClient(main.app) as client:
-        response = client.post(
-            "/tasks/",
-            json={"task_id": "cancel-1", "prompt": "Create acceptance.txt"},
-        )
+        response = client.post("/tasks/", json={"task_id": "cancel-1", "prompt": "Create acceptance.txt"})
         assert response.status_code == 202
         assert router.started.wait(timeout=1)
 
