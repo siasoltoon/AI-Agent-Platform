@@ -71,7 +71,10 @@ class ReliableAgentExecutor:
                 r"|\btests?\s+(?:must|should|need to)\s+(?:pass|run|execute)\b",
                 lower,
             )),
-            "build": bool(re.search(r"\b(build (?:the|this|project|application|frontend|backend|artifact)|compile|compilation|npm run build)\b", lower)),
+            "build": bool(re.search(
+                r"\b(?:build|compile|compilation|compiling|npm\s+run\s+build)\b",
+                lower,
+            )),
             "inspect": bool(re.search(r"\b(inspect|review|audit)\b", lower)),
             "verify": bool(re.search(r"\b(verify|verification|validate|validation|check)\b", lower)),
             "documentation": "readme" in lower or "documentation" in lower,
