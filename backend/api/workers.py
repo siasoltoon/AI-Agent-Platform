@@ -29,13 +29,22 @@ def _worker_record() -> dict[str, Any]:
 
     resources = health.get("resources") if isinstance(health.get("resources"), dict) else None
     worker_status = str(health.get("worker_status") or "unknown").lower()
+
+    # The worker reports telemetry under `resources`, while the dashboard's
+    # worker card reads health-level fields. Preserve the full worker health
+    # payload and promote the live resource metrics for that established UI
+    # contract instead of making the frontend know about transport details.
+    health_for_dashboard = dict(health)
+    if resources:
+        health_for_dashboard.update(resources)
+
     return {
         "worker_id": str(health.get("worker_id") or f"{WORKER_HOST}:{WORKER_PORT}"),
         "host": WORKER_HOST,
         "port": WORKER_PORT,
         "status": "online",
         "worker_status": worker_status,
-        "health": health,
+        "health": health_for_dashboard,
         "resources": resources,
         "error": None,
     }
