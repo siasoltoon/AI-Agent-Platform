@@ -24,7 +24,9 @@ MAX_TASK_ID_CHARS = 128
 MAX_MODEL_CHARS = 128
 MAX_TIMEOUT_SECONDS = 1800
 MAX_METADATA_KEYS = 64
-MAX_AGENT_STEPS = 32
+MAX_NORMAL_AGENT_STEPS = 32
+MAX_LARGE_AGENT_STEPS = 64
+MAX_AGENT_STEPS = MAX_LARGE_AGENT_STEPS
 
 # Compatibility injection point retained for the existing worker contract and
 # tests. It now points to the self-repairing executor, so the default behavior
@@ -100,13 +102,19 @@ class Worker:
                 raise ValueError(f"Task metadata cannot contain more than {MAX_METADATA_KEYS} keys.")
             workspace = metadata.get("workspace")
 
-            requested_steps = int(metadata.get("max_agent_steps", MAX_AGENT_STEPS))
-            if requested_steps < 1 or requested_steps > MAX_AGENT_STEPS:
-                raise ValueError(f"max_agent_steps must be between 1 and {MAX_AGENT_STEPS}.")
+            execution_profile = str(metadata.get("execution_profile", "normal")).strip().lower()
+            if execution_profile not in {"normal", "large"}:
+                raise ValueError("execution_profile must be either 'normal' or 'large'.")
+            maximum_steps = MAX_LARGE_AGENT_STEPS if execution_profile == "large" else MAX_NORMAL_AGENT_STEPS
+            requested_steps = int(metadata.get("max_agent_steps", maximum_steps))
+            if requested_steps < 1 or requested_steps > maximum_steps:
+                raise ValueError(
+                    f"max_agent_steps must be between 1 and {maximum_steps} for the {execution_profile} execution profile."
+                )
 
             logger.info(
-                "Executing task_id=%s model=%s prompt_length=%s timeout=%s mode=agentic-reliable max_agent_steps=%s self_repair_attempts=%s",
-                job.get("task_id"), model, len(prompt), timeout, requested_steps, ReliableAgentExecutor.MAX_ATTEMPTS,
+                "Executing task_id=%s model=%s prompt_length=%s timeout=%s mode=agentic-reliable profile=%s max_agent_steps=%s self_repair_attempts=%s",
+                job.get("task_id"), model, len(prompt), timeout, execution_profile, requested_steps, ReliableAgentExecutor.MAX_ATTEMPTS,
             )
             service = OllamaService(base_url=OLLAMA_HOST, model=model, timeout=timeout)
             executor = AgentExecutor(
@@ -125,6 +133,8 @@ class Worker:
                 "worker_id": self.worker_id,
                 "task_id": job.get("task_id"),
                 "model": model,
+                "execution_profile": execution_profile,
+                "max_agent_steps": requested_steps,
                 "result": result,
                 "resource_snapshot": resource_snapshot(),
             }
@@ -153,6 +163,8 @@ def health() -> dict[str, Any]:
         "execution_mode": "agentic-reliable",
         "max_timeout_seconds": MAX_TIMEOUT_SECONDS,
         "max_agent_steps": MAX_AGENT_STEPS,
+        "normal_agent_steps": MAX_NORMAL_AGENT_STEPS,
+        "large_agent_steps": MAX_LARGE_AGENT_STEPS,
         "self_repair_attempts": ReliableAgentExecutor.MAX_ATTEMPTS,
         "last_completed_at": worker.last_completed_at,
         "last_error": worker.last_error,
