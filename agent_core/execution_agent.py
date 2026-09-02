@@ -281,7 +281,9 @@ Return exactly one JSON object per turn:
 Workspace tools: read_file, write_file, file_exists, directory_exists, list_directory, make_directory, search_files, copy_file, move_file, delete_file, file_hash.
 Execution tool: terminal. Terminal aliases include type, cat, dir, ls, pwd, where, findstr, fc, tree, more, echo, mkdir, mktemp, whoami, hostname, ver, date, time, python, py, pytest, pip, pip3, git, uvicorn, ruff, black, mypy, node, npm, npx, vite, yarn, pnpm, dotnet, java, javac, go, cargo, rustc.
 
-Rules: stay inside workspace; inspect before risky changes; prefer dedicated tools; after every mutation ensure the resulting state is observable; for requested content verify exact equality; never claim completion without evidence; recover from transient failures when possible; return done only when evidence supports success."""
+Rules: stay inside workspace; inspect before risky changes; prefer dedicated tools; after every mutation ensure the resulting state is observable; for requested content verify exact equality; never claim completion without evidence; recover from transient failures when possible; return done only when evidence supports success.
+
+Completion discipline: if the task requires creating, modifying, deleting, testing, inspecting, or verifying anything, a done action is invalid until the required tool actions have actually been executed and observed. If you are unsure whether the task is complete, use a tool rather than returning done."""
         if verification_requested:
             system += """
 
@@ -321,7 +323,13 @@ The execution runtime independently validates the real filesystem and generated 
 
             if decision.get("action") == "done":
                 if not records:
-                    raise AgentExecutionError("Agent attempted completion without executing any tool action.")
+                    conversation += (
+                        "\n\nPREMATURE COMPLETION REJECTED: You have executed zero tool actions. "
+                        "The task is not complete. Do not return done again. "
+                        "Your next response MUST be a tool action that advances the original task, "
+                        "such as write_file/read_file/file_exists/terminal as appropriate."
+                    )
+                    continue
                 evidence = self._verify_evidence(task, records)
                 actions[-1]["verification"] = evidence
                 if evidence["verified"]:
