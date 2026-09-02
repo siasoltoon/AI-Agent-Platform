@@ -1,17 +1,14 @@
-"""Self-repairing orchestration layer for autonomous coding tasks.
-
-The reliable executor keeps a mission alive until the observable completion
-contract passes. Failed actions, incomplete work and weak evidence become
-continuation prompts instead of premature success.
-"""
+"""Self-repairing orchestration layer for autonomous coding tasks."""
 
 from __future__ import annotations
 
 import json
 import re
+from time import monotonic
 from typing import Any
 
 from agent_core.execution_agent import AgentExecutionError, AgentExecutor
+from agent_core.execution_evidence import ExecutionBudget, enrich_execution_evidence
 from backend.services.ollama_service import OllamaService
 
 
@@ -28,12 +25,14 @@ class ReliableAgentExecutor:
         max_steps: int = DEFAULT_AGENT_STEPS,
         max_attempts: int = MAX_ATTEMPTS,
         max_output_chars: int = 12000,
+        budget: ExecutionBudget | None = None,
     ) -> None:
         self.ollama = ollama
         self.workspace_root = workspace_root
-        self.max_steps = max(1, min(int(max_steps), 128))
-        self.max_attempts = max(1, min(int(max_attempts), self.MAX_ATTEMPTS))
-        self.max_output_chars = max(256, int(max_output_chars))
+        self.budget = budget or ExecutionBudget()
+        self.max_steps = max(1, min(int(max_steps), 128, self.budget.max_steps, self.budget.max_tool_calls))
+        self.max_attempts = max(1, min(int(max_attempts), self.MAX_ATTEMPTS, self.budget.max_recovery_attempts))
+        self.max_output_chars = max(256, min(int(max_output_chars), self.budget.max_output_chars))
 
     @staticmethod
     def _records(result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -165,11 +164,15 @@ The goal of this recovery attempt is to finish the ORIGINAL MISSION, not to expl
             raise AgentExecutionError("Task prompt cannot be empty.")
 
         original = prompt.strip()
+        started_at = monotonic()
         last_error = ""
         last_result: dict[str, Any] | None = None
         attempt_records: list[dict[str, Any]] = []
 
         for attempt in range(1, self.max_attempts + 1):
+            if monotonic() - started_at >= self.budget.max_runtime_seconds:
+                break
+
             effective_prompt = original if attempt == 1 else self._continuation_prompt(original, attempt, last_error, last_result)
             executor = AgentExecutor(
                 self.ollama,
@@ -179,7 +182,28 @@ The goal of this recovery attempt is to finish the ORIGINAL MISSION, not to expl
             )
             try:
                 result = executor.execute(effective_prompt)
+                result = enrich_execution_evidence(
+                    result,
+                    started_at=started_at,
+                    recovery_attempts=attempt - 1,
+                    retries=attempt - 1,
+                )
                 last_result = result
+                evidence = self._evidence(result)
+                budget_reason = None
+                if evidence.get("tool_calls", 0) > self.budget.max_tool_calls:
+                    budget_reason = "max_tool_calls"
+                elif evidence.get("output_chars", 0) > self.budget.max_output_chars:
+                    budget_reason = "max_output_chars"
+                elif evidence.get("elapsed_seconds", 0) >= self.budget.max_runtime_seconds:
+                    budget_reason = "max_runtime_seconds"
+                if budget_reason:
+                    result["status"] = "blocked"
+                    result["execution_evidence"]["budget_exceeded"] = budget_reason
+                    last_error = f"Execution budget exceeded: {budget_reason}"
+                    attempt_records.append({"attempt": attempt, "accepted": False, "blocker": budget_reason})
+                    break
+
                 accepted, blockers = self._quality_gate(original, result)
                 attempt_records.append({"attempt": attempt, "accepted": accepted, "blockers": blockers})
                 if accepted:
@@ -194,11 +218,26 @@ The goal of this recovery attempt is to finish the ORIGINAL MISSION, not to expl
             except Exception as exc:
                 partial = getattr(exc, "partial_result", None)
                 if isinstance(partial, dict):
-                    last_result = partial
+                    last_result = enrich_execution_evidence(
+                        partial,
+                        started_at=started_at,
+                        recovery_attempts=attempt - 1,
+                        retries=attempt - 1,
+                    )
                 last_error = f"{type(exc).__name__}: {exc}"
                 attempt_records.append({"attempt": attempt, "accepted": False, "error": last_error})
 
+        evidence = self._evidence(last_result) if isinstance(last_result, dict) else {}
+        if isinstance(last_result, dict):
+            last_result["reliability"] = {
+                "attempts": len(attempt_records),
+                "self_repaired": len(attempt_records) > 1,
+                "quality_gate": "blocked",
+                "attempt_history": attempt_records,
+            }
+            last_result["execution_evidence"] = evidence
         raise AgentExecutionError(
-            f"Agent could not complete the task after {self.max_attempts} self-repair attempts. "
-            f"Last failure: {last_error}"
+            f"Agent could not complete the task within execution budgets after {len(attempt_records)} attempts. "
+            f"Last failure: {last_error or 'execution budget exhausted'}",
+            partial_result=last_result,
         )
