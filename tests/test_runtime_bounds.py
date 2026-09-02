@@ -60,7 +60,7 @@ def test_runtime_promotes_large_missions_to_one_real_agentic_execution():
     payload, timeout = worker.calls[0]
     assert timeout == 1800
     assert payload["metadata"]["execution_profile"] == "large"
-    assert payload["metadata"]["max_agent_steps"] == 32
+    assert payload["metadata"]["max_agent_steps"] == 64
 
 
 def test_runtime_allows_large_mission_to_lower_its_step_budget():
@@ -82,8 +82,8 @@ def test_runtime_rejects_large_mission_step_budget_above_safe_limit():
     runtime = AgentRuntime(worker_client=worker)
     runtime.large_task_threshold = 10
 
-    with pytest.raises(ValueError, match="between 1 and 32"):
-        runtime.execute("this is a large mission", metadata={"max_agent_steps": 33})
+    with pytest.raises(ValueError, match="between 1 and 64"):
+        runtime.execute("this is a large mission", metadata={"max_agent_steps": 65})
 
     assert worker.calls == []
 
