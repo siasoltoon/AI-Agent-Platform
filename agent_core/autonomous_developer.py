@@ -63,6 +63,14 @@ class AutonomousDeveloper:
         return nested if isinstance(nested, dict) else {}
 
     @staticmethod
+    def _root_task_id(task_id: str) -> str:
+        """Map adaptive recovery task ids back to the user-visible root task."""
+        for marker in (":diagnose:", ":repair:"):
+            if marker in task_id:
+                return task_id.split(marker, 1)[0]
+        return task_id
+
+    @staticmethod
     def _has_successful_test_evidence(result: dict[str, Any]) -> bool:
         records = result.get("tool_records", []) if isinstance(result, dict) else []
         if not isinstance(records, list):
@@ -195,7 +203,7 @@ class AutonomousDeveloper:
                             return {
                                 "mission_id": mission_id,
                                 "status": "blocked",
-                                "task": task.task_id,
+                                "task": self._root_task_id(task.task_id),
                                 "failure_class": category.value,
                                 "error": str(exc),
                                 "memory": memory.snapshot(),
@@ -203,7 +211,7 @@ class AutonomousDeveloper:
                 if not completed and graph.tasks[task.task_id].status == "pending":
                     continue
                 if not completed:
-                    return {"mission_id": mission_id, "status": "blocked", "task": task.task_id, "memory": memory.snapshot()}
+                    return {"mission_id": mission_id, "status": "blocked", "task": self._root_task_id(task.task_id), "memory": memory.snapshot()}
 
         last_execution = memory.last_execution
         final_verification = verify_execution(last_execution)
