@@ -203,6 +203,9 @@ class AutonomousDeveloper:
                                 "execution_profile": "large",
                             },
                         )
+                        cancelled = self._cancelled_snapshot(mission_id)
+                        if cancelled:
+                            return cancelled
                         nested = self._nested_execution(result)
                         memory.record_execution(nested)
                         verification = verify_execution(nested)
