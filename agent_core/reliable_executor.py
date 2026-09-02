@@ -54,11 +54,23 @@ class ReliableAgentExecutor:
         payload = record.get("result")
         return str(payload.get("command", "")) if isinstance(payload, dict) else ""
 
+    @staticmethod
+    def _remove_non_instructional_test_mentions(prompt: str) -> str:
+        """Remove test-like words that occur only as filenames or path fragments."""
+        text = re.sub(r"(?i)\b[\w./\\-]*test[\w./\\-]*\.(?:txt|md|rst|log|json|ya?ml|toml|ini|cfg|conf)\b", " ", prompt)
+        text = re.sub(r"(?i)\b(?:test|tests)[\w./\\-]*\.(?:py|js|jsx|ts|tsx|sh|bat|ps1)\b", " ", text)
+        return text
+
     @classmethod
     def _quality_requirements(cls, prompt: str) -> dict[str, bool]:
-        lower = prompt.lower()
+        lower = cls._remove_non_instructional_test_mentions(prompt).lower()
         return {
-            "tests": bool(re.search(r"\b(test|tests|pytest|test suite|automated tests)\b", lower)),
+            "tests": bool(re.search(
+                r"\b(?:run|execute|perform|write|create|add|build|pass|fix|verify|validate)\s+(?:the\s+)?(?:automated\s+)?(?:tests?|test suite)\b"
+                r"|\b(?:pytest|test suite|automated tests|unit tests|integration tests)\b"
+                r"|\btests?\s+(?:must|should|need to)\s+(?:pass|run|execute)\b",
+                lower,
+            )),
             "build": bool(re.search(r"\b(build (?:the|this|project|application|frontend|backend|artifact)|compile|compilation|npm run build)\b", lower)),
             "inspect": bool(re.search(r"\b(inspect|review|audit)\b", lower)),
             "verify": bool(re.search(r"\b(verify|verification|validate|validation|check)\b", lower)),
