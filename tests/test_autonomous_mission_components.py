@@ -27,18 +27,31 @@ def test_memory_checkpoint_round_trip():
     memory = MissionMemory("m1", "build bot")
     memory.checkpoint(step_id="recon", summary="repository inspected")
     memory.record_failure("testing", "pytest timeout")
+    memory.record_attempt("testing", 2)
+    memory.record_execution({"status": "completed"})
     store = MissionMemoryStore()
     store.save(memory)
     restored = store.load("m1")
     assert restored is not None
     assert restored.checkpoints[0]["step_id"] == "recon"
     assert restored.failures
+    assert restored.task_attempts["testing"] == 2
+    assert restored.last_execution["status"] == "completed"
 
 
-def test_context_is_bounded():
-    manager = MissionContextManager(max_chars=100, chunk_chars=50)
-    context = manager.build(objective="x" * 500)
-    assert len(context) <= 100
+def test_context_is_bounded_and_preserves_critical_mission_fields():
+    manager = MissionContextManager(max_chars=220, chunk_chars=50)
+    context = manager.build(
+        objective="build the production agent",
+        active_task="implement durable resume",
+        architecture="task graph and runtime",
+        memory="m" * 1000,
+    )
+    assert len(context) <= 220
+    assert "[OBJECTIVE]" in context
+    assert "build the production agent" in context
+    assert "[ACTIVE TASK]" in context
+    assert "implement durable resume" in context
     assert all(len(chunk) <= 50 for chunk in manager.chunks(context))
 
 
