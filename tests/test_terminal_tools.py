@@ -1,5 +1,4 @@
 import shutil
-import sys
 
 import pytest
 
@@ -56,12 +55,11 @@ def test_terminal_runs_commands_from_configured_workspace(tmp_path):
 
 def test_terminal_mkdir_cannot_escape_configured_workspace(tmp_path):
     with pytest.raises(PermissionError, match="escapes the configured workspace"):
-        TerminalTool(workspace_root=tmp_path).execute("mkdir ..\\outside-agent-workspace")
+        TerminalTool(workspace_root=tmp_path).execute("mkdir ../outside-agent-workspace")
 
 
 def test_terminal_timeout_returns_structured_observation():
-    python = sys.executable.replace("\\", "/")
-    result = TerminalTool().execute(f'"{python}" -c "import time; time.sleep(2)"', timeout=1)
+    result = TerminalTool().execute('python -c "import time; time.sleep(2)"', timeout=1)
     assert result["code"] == 124
     assert result["timed_out"] is True
     assert result["timeout_seconds"] == 1
