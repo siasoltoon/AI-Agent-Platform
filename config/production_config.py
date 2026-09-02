@@ -33,6 +33,17 @@ def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
     return value
 
 
+def _env_float(name: str, default: float, *, minimum: float, maximum: float) -> float:
+    raw = os.getenv(name)
+    try:
+        value = float(raw) if raw is not None else default
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number.") from exc
+    if value < minimum or value > maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}.")
+    return value
+
+
 def _cors_origins() -> tuple[str, ...]:
     raw = os.getenv(
         "CORS_ORIGINS",
@@ -43,9 +54,6 @@ def _cors_origins() -> tuple[str, ...]:
         raise ValueError("CORS_ORIGINS must contain at least one origin.")
     if "*" in origins:
         raise ValueError("CORS_ORIGINS cannot contain '*' in production configuration.")
-
-    # The local Vite dashboard uses port 5173. Keep these development origins
-    # available even when an older local .env still contains only port 3000.
     if os.getenv("ENVIRONMENT", "development").strip().lower() != "production":
         for local_origin in ("http://127.0.0.1:5173", "http://localhost:5173"):
             if local_origin not in origins:
@@ -60,6 +68,8 @@ class ProductionConfig:
     host: str
     port: int
     log_level: str
+    max_queued_tasks: int
+    shutdown_timeout_seconds: float
 
     @property
     def is_production(self) -> bool:
@@ -70,21 +80,20 @@ def load_config() -> ProductionConfig:
     environment = os.getenv("ENVIRONMENT", "development").strip().lower()
     if environment not in {"development", "test", "production"}:
         raise ValueError("ENVIRONMENT must be development, test, or production.")
-
     host = os.getenv("API_HOST", "0.0.0.0").strip()
     if not host:
         raise ValueError("API_HOST cannot be empty.")
-
     log_level = os.getenv("LOG_LEVEL", "info").strip().lower()
     if log_level not in {"debug", "info", "warning", "error", "critical"}:
         raise ValueError("LOG_LEVEL must be debug, info, warning, error, or critical.")
-
     return ProductionConfig(
         environment=environment,
         cors_origins=_cors_origins(),
         host=host,
         port=_env_int("API_PORT", 8000, minimum=1, maximum=65535),
         log_level=log_level,
+        max_queued_tasks=_env_int("MAX_QUEUED_TASKS", 100, minimum=1, maximum=10000),
+        shutdown_timeout_seconds=_env_float("SHUTDOWN_TIMEOUT_SECONDS", 10.0, minimum=1.0, maximum=120.0),
     )
 
 
