@@ -14,18 +14,24 @@ from task_engine.exact_content_gate import verify_exact_content
 class TaskRunner:
     """Run persisted tasks outside HTTP with bounded retries and cancellation safety."""
 
-    def __init__(self, store, router, *, poll_seconds: float = 0.25, default_retries: int = 5) -> None:
+    def __init__(self, store, router, *, poll_seconds: float = 0.25, default_retries: int = 5, shutdown_timeout_seconds: float = 5.0) -> None:
         self.store = store
         self.router = router
         self.poll_seconds = max(0.05, float(poll_seconds))
         self.default_retries = max(0, min(int(default_retries), 5))
+        self.shutdown_timeout_seconds = max(0.1, float(shutdown_timeout_seconds))
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._lifecycle_lock = threading.Lock()
+        self._shutdown_timed_out = False
 
     @property
     def running(self) -> bool:
         return bool(self._thread and self._thread.is_alive())
+
+    @property
+    def shutdown_timed_out(self) -> bool:
+        return self._shutdown_timed_out
 
     def start(self) -> None:
         with self._lifecycle_lock:
@@ -33,15 +39,19 @@ class TaskRunner:
                 return
             self.store.recover_running_tasks()
             self._stop.clear()
+            self._shutdown_timed_out = False
             self._thread = threading.Thread(target=self._run, name="task-runner", daemon=True)
             self._thread.start()
 
-    def stop(self) -> None:
+    def stop(self, *, timeout_seconds: float | None = None) -> bool:
         with self._lifecycle_lock:
             self._stop.set()
             thread = self._thread
+            timeout = self.shutdown_timeout_seconds if timeout_seconds is None else max(0.1, float(timeout_seconds))
         if thread and thread.is_alive():
-            thread.join(timeout=5.0)
+            thread.join(timeout=timeout)
+        self._shutdown_timed_out = bool(thread and thread.is_alive())
+        return not self._shutdown_timed_out
 
     def _run(self) -> None:
         while not self._stop.is_set():
