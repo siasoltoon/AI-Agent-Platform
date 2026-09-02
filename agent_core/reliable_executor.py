@@ -54,6 +54,19 @@ class ReliableAgentExecutor:
         return str(payload.get("command", "")) if isinstance(payload, dict) else ""
 
     @staticmethod
+    def _terminal_succeeded(record: dict[str, Any]) -> bool:
+        """Return true only when a terminal command actually exited successfully."""
+        if not isinstance(record, dict) or record.get("ok") is not True:
+            return False
+        payload = record.get("result")
+        if not isinstance(payload, dict):
+            return False
+        if payload.get("timed_out") is True:
+            return False
+        code = payload.get("code")
+        return isinstance(code, int) and code == 0
+
+    @staticmethod
     def _remove_non_instructional_test_mentions(prompt: str) -> str:
         """Remove test-like words that occur only as filenames or path fragments."""
         text = re.sub(r"(?i)\b[\w./\\-]*test[\w./\\-]*\.(?:txt|md|rst|log|json|ya?ml|toml|ini|cfg|conf)\b", " ", prompt)
@@ -95,23 +108,30 @@ class ReliableAgentExecutor:
             blockers.append("no_successful_tool_action")
 
         tools = {str(record.get("tool", "")).lower() for record in successful}
-        terminal_commands = [
-            cls._command(record).lower()
-            for record in successful
+        terminal_records = [
+            record for record in successful
             if str(record.get("tool", "")).lower() == "terminal"
             or str(record.get("tool", "")).lower() in {"pytest", "python", "py", "pip", "npm", "node", "ruff", "mypy", "black", "vite"}
         ]
+        terminal_commands = [cls._command(record).lower() for record in terminal_records]
 
         if requirements["tests"] and not any(
-            "pytest" in command
-            or ("test" in command and any(token in command for token in ("python", "py", "npm", "yarn", "pnpm", "cargo", "go")))
-            for command in terminal_commands
+            cls._terminal_succeeded(record)
+            and (
+                "pytest" in cls._command(record).lower()
+                or (
+                    "test" in cls._command(record).lower()
+                    and any(token in cls._command(record).lower() for token in ("python", "py", "npm", "yarn", "pnpm", "cargo", "go"))
+                )
+            )
+            for record in terminal_records
         ):
             blockers.append("requested_tests_not_executed_successfully")
 
         if requirements["build"] and not any(
-            any(token in command for token in ("build", "compile", "py_compile"))
-            for command in terminal_commands
+            cls._terminal_succeeded(record)
+            and any(token in cls._command(record).lower() for token in ("build", "compile", "py_compile"))
+            for record in terminal_records
         ):
             blockers.append("requested_build_or_compile_not_executed_successfully")
 
