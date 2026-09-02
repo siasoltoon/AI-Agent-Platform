@@ -31,6 +31,7 @@ async def lifespan(_: FastAPI):
         yield
     finally:
         runner.stop()
+        tasks.TASK_RUNNER = None
 
 
 app = FastAPI(
@@ -57,11 +58,13 @@ app.include_router(dashboard.router)
 @app.get("/")
 async def health() -> dict:
     """Backward-compatible service health endpoint."""
+    runner = tasks.TASK_RUNNER
     return {
         "status": "running",
         "service": "AI-Agent-Platform",
         "version": app.version,
         "environment": CONFIG.environment,
+        "runner": "running" if runner is not None and runner.running else "stopped",
     }
 
 
@@ -78,22 +81,24 @@ async def liveness() -> dict:
 
 @app.get("/health/ready", tags=["Health"])
 async def readiness() -> dict:
-    """Readiness probe that verifies the durable task store is reachable."""
+    """Readiness probe verifies durable storage and the background runner."""
+    checks = {}
     try:
         storage_ready = tasks.TASK_STORE.ping()
     except Exception:
-        return {
-            "status": "not_ready",
-            "service": app.title,
-            "version": app.version,
-            "checks": {"task_store": "failed"},
-        }
+        storage_ready = False
+    checks["task_store"] = "ok" if storage_ready else "failed"
 
+    runner = tasks.TASK_RUNNER
+    runner_ready = runner is not None and runner.running
+    checks["task_runner"] = "ok" if runner_ready else "failed"
+
+    ready = storage_ready and runner_ready
     return {
-        "status": "ready" if storage_ready else "not_ready",
+        "status": "ready" if ready else "not_ready",
         "service": app.title,
         "version": app.version,
-        "checks": {"task_store": "ok" if storage_ready else "failed"},
+        "checks": checks,
     }
 
 
