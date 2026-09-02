@@ -51,8 +51,8 @@ def test_execute_carries_partial_result_into_recovery_prompt(monkeypatch, tmp_pa
 
         def execute(self, prompt):
             prompts.append(prompt)
-            self.calls += 1
-            if self.calls == 1:
+            type(self).calls += 1
+            if type(self).calls == 1:
                 raise AgentExecutionError("Agent stopped before producing a verified completion.", partial_result=partial)
             return _result(tests=True)
 
