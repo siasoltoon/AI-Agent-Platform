@@ -176,10 +176,14 @@ class AutonomousDeveloper:
                         completed = True
                         break
                     except Exception as exc:
-                        repaired = self._recover(graph, task, exc, memory)
-                        self.memory_store.save(memory)
                         category = classify_failure(exc)
-                        if repaired and offset == retries:
+                        repaired = False
+                        if offset == retries and category not in {FailureClass.BLOCKING, FailureClass.VALIDATION, FailureClass.UNKNOWN}:
+                            repaired = self._recover(graph, task, exc, memory)
+                        else:
+                            memory.record_failure(task.task_id, f"{category.value}: {exc}")
+                        self.memory_store.save(memory)
+                        if repaired:
                             graph.mark_pending(task.task_id)
                             memory.pending = [t.task_id for t in graph.tasks.values() if t.status != "completed"]
                             self.memory_store.save(memory)
