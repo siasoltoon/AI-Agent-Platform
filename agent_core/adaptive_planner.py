@@ -19,7 +19,7 @@ class PlanningContext:
 
 
 class AdaptivePlanner:
-    """Build and evolve a task graph from repository evidence rather than a fixed workflow."""
+    """Build and evolve a bounded task graph from repository evidence."""
 
     MAX_TASKS = 128
 
@@ -31,6 +31,7 @@ class AdaptivePlanner:
         if len(proposed_tasks) > self.MAX_TASKS:
             raise ValueError(f"Planner cannot create more than {self.MAX_TASKS} tasks")
         tasks = []
+        seen: set[str] = set()
         for item in proposed_tasks:
             task_id = str(item.get("task_id", "")).strip()
             title = str(item.get("title", "")).strip()
@@ -38,6 +39,9 @@ class AdaptivePlanner:
             deps = {str(dep).strip() for dep in item.get("depends_on", []) if str(dep).strip()}
             if not task_id or not title or not objective:
                 raise ValueError("Every planned task requires task_id, title, and objective")
+            if task_id in seen:
+                raise ValueError(f"Duplicate planned task: {task_id}")
+            seen.add(task_id)
             tasks.append(GraphTask(task_id, title, objective, deps))
         return TaskGraph(tasks)
 
@@ -53,19 +57,43 @@ class AdaptivePlanner:
             FailureClass.UNKNOWN: "inspect_failure_evidence_before_retry",
         }[category]
 
-    def expand_after_failure(self, graph: TaskGraph, failed_task_id: str, error: BaseException | str) -> list[GraphTask]:
-        """Add bounded diagnostic/repair tasks without mutating completed dependencies."""
+    def expand_after_failure(
+        self,
+        graph: TaskGraph,
+        failed_task_id: str,
+        error: BaseException | str,
+    ) -> list[GraphTask]:
+        """Add bounded diagnosis/repair work that must complete before the failed task retries."""
         if failed_task_id not in graph.tasks:
             raise KeyError(failed_task_id)
         category = classify_failure(error)
         if category in {FailureClass.BLOCKING, FailureClass.VALIDATION}:
             return []
-        repair_id = f"{failed_task_id}:repair:{graph.tasks[failed_task_id].attempts + 1}"
-        diagnosis_id = f"{failed_task_id}:diagnose:{graph.tasks[failed_task_id].attempts + 1}"
+
+        attempt = graph.tasks[failed_task_id].attempts + 1
+        diagnosis_id = f"{failed_task_id}:diagnose:{attempt}"
+        repair_id = f"{failed_task_id}:repair:{attempt}"
         if diagnosis_id in graph.tasks or repair_id in graph.tasks:
             return []
-        diagnosis = GraphTask(diagnosis_id, "Diagnose failure", f"Inspect the failure evidence for task {failed_task_id}, identify the root cause, and determine the minimal repair.", set(graph.tasks[failed_task_id].depends_on))
-        repair = GraphTask(repair_id, "Repair root cause", f"Apply and verify the root-cause repair for task {failed_task_id} after diagnosis.", {diagnosis_id})
-        graph.tasks[diagnosis_id] = diagnosis
-        graph.tasks[repair_id] = repair
+
+        original = graph.tasks[failed_task_id]
+        diagnosis = GraphTask(
+            diagnosis_id,
+            "Diagnose failure",
+            f"Inspect the failure evidence for task {failed_task_id}, identify the root cause, and determine the minimal repair.",
+            set(original.depends_on),
+        )
+        graph.add_task(diagnosis)
+        try:
+            repair = GraphTask(
+                repair_id,
+                "Repair root cause",
+                f"Apply and verify the root-cause repair for task {failed_task_id} after diagnosis.",
+                {diagnosis_id},
+            )
+            graph.add_task(repair)
+            graph.add_dependency(failed_task_id, repair_id)
+        except Exception:
+            graph.tasks.pop(diagnosis_id, None)
+            raise
         return [diagnosis, repair]
