@@ -128,6 +128,18 @@ async def retry_failed_task(task_id: str) -> TaskResponse:
     return TaskResponse(**task)
 
 
+@router.post("/{task_id}/resume", response_model=TaskResponse)
+async def resume_completed_task(task_id: str) -> TaskResponse:
+    """Explicitly resume a completed task with the same durable task identity."""
+    try:
+        task = TASK_STORE.resume_completed(task_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Task not found.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail={"task_id": task_id, "message": str(exc)}) from exc
+    return TaskResponse(**task)
+
+
 @router.get("", response_model=dict)
 async def list_tasks(limit: int = 100, status: str | None = None) -> dict:
     if status is not None and status.strip().lower() not in {item.value for item in TaskStatus}:
