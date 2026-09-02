@@ -28,8 +28,7 @@ class MissionAcceptanceGate:
             "tests_checked": bool(tests_checked),
             "final_reviewed": bool(final_reviewed),
             "execution_verified": verification.verified,
+            "mission_completed": mission_status == "completed",
         }
         reasons = [name for name, passed in checks.items() if not passed]
-        if mission_status == "blocked":
-            reasons.append("mission_blocked")
         return AcceptanceResult(accepted=not reasons, reasons=reasons, verification=verification)
