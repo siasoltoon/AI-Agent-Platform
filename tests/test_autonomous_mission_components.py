@@ -39,7 +39,7 @@ def test_memory_checkpoint_round_trip():
     assert restored.last_execution["status"] == "completed"
 
 
-def test_mission_lifecycle_is_durable_and_terminal_states_are_protected():
+def test_mission_lifecycle_transition_matrix_and_terminal_protection():
     memory = MissionMemory("m2", "harden agent")
     assert memory.status == "pending"
     memory.transition("running")
@@ -49,23 +49,34 @@ def test_mission_lifecycle_is_durable_and_terminal_states_are_protected():
     memory.transition("running")
     memory.transition("completed")
     assert memory.snapshot()["status"] == "completed"
+    for status in ("running", "blocked", "cancelled"):
+        try:
+            memory.transition(status)
+        except ValueError as exc:
+            assert "transition" in str(exc).lower()
+        else:
+            raise AssertionError("terminal mission must not be reopened")
+
+
+def test_invalid_lifecycle_transition_is_rejected():
+    memory = MissionMemory("m3", "transition guard")
     try:
-        memory.transition("running")
+        memory.transition("completed")
     except ValueError as exc:
-        assert "terminal" in str(exc).lower()
+        assert "transition" in str(exc).lower()
     else:
-        raise AssertionError("terminal mission must not be reopened")
+        raise AssertionError("pending mission must not jump directly to completed")
 
 
 def test_blocked_mission_can_be_resumed():
-    memory = MissionMemory("m3", "resume mission", status="blocked")
+    memory = MissionMemory("m4", "resume mission", status="blocked")
     memory.transition("running")
     assert memory.status == "running"
 
 
 def test_invalid_mission_status_is_rejected():
     try:
-        MissionMemory("m4", "invalid status", status="unknown")
+        MissionMemory("m5", "invalid status", status="unknown")
     except ValueError as exc:
         assert "invalid mission status" in str(exc).lower()
     else:
