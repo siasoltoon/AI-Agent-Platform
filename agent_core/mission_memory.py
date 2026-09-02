@@ -8,6 +8,8 @@ from typing import Any
 
 @dataclass
 class MissionMemory:
+    """Durable state for a mission, including enough information to resume it."""
+
     mission_id: str
     objective: str
     architecture: str = ""
@@ -18,8 +20,16 @@ class MissionMemory:
     changed_files: list[str] = field(default_factory=list)
     tests: list[dict[str, Any]] = field(default_factory=list)
     checkpoints: list[dict[str, Any]] = field(default_factory=list)
+    task_attempts: dict[str, int] = field(default_factory=dict)
+    last_execution: dict[str, Any] = field(default_factory=dict)
 
-    def checkpoint(self, *, step_id: str, summary: str, evidence: dict[str, Any] | None = None) -> dict[str, Any]:
+    def checkpoint(
+        self,
+        *,
+        step_id: str,
+        summary: str,
+        evidence: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         item = {"step_id": step_id, "summary": summary, "evidence": evidence or {}}
         self.checkpoints.append(item)
         return item
@@ -29,6 +39,13 @@ class MissionMemory:
 
     def record_test(self, name: str, passed: bool, details: str = "") -> None:
         self.tests.append({"name": name, "passed": bool(passed), "details": details})
+
+    def record_attempt(self, step_id: str, attempt: int) -> None:
+        self.task_attempts[step_id] = max(int(attempt), self.task_attempts.get(step_id, 0))
+
+    def record_execution(self, result: dict[str, Any]) -> None:
+        """Keep the last real runtime result for final acceptance and diagnostics."""
+        self.last_execution = result
 
     def snapshot(self) -> dict[str, Any]:
         return asdict(self)
@@ -60,9 +77,16 @@ class MissionMemoryStore:
         if not payload:
             return None
         return MissionMemory(
-            mission_id=payload["mission_id"], objective=payload["objective"], architecture=payload.get("architecture", ""),
-            decisions=list(payload.get("decisions", [])), completed=list(payload.get("completed", [])),
-            pending=list(payload.get("pending", [])), failures=list(payload.get("failures", [])),
-            changed_files=list(payload.get("changed_files", [])), tests=list(payload.get("tests", [])),
+            mission_id=payload["mission_id"],
+            objective=payload["objective"],
+            architecture=payload.get("architecture", ""),
+            decisions=list(payload.get("decisions", [])),
+            completed=list(payload.get("completed", [])),
+            pending=list(payload.get("pending", [])),
+            failures=list(payload.get("failures", [])),
+            changed_files=list(payload.get("changed_files", [])),
+            tests=list(payload.get("tests", [])),
             checkpoints=list(payload.get("checkpoints", [])),
+            task_attempts={key: int(value) for key, value in payload.get("task_attempts", {}).items()},
+            last_execution=dict(payload.get("last_execution", {})),
         )
