@@ -30,6 +30,17 @@ class TerminalTool(BaseTool):
         r"(?:\b(?:del|erase|format|shutdown|restart|taskkill|diskpart|reg|powershell|pwsh|cmd|rmdir|rd)\b|"
         r"[;&|><`]|(?:\b(?:rm|sudo|chmod|chown)\b))", re.IGNORECASE,
     )
+    MAX_OUTPUT_CHARS = 12_000
+
+    def __init__(self, workspace_root: str | Path | None = None) -> None:
+        self.workspace = Path(workspace_root or Path.cwd()).resolve()
+
+    @staticmethod
+    def _truncate(value: str) -> str:
+        if len(value) <= TerminalTool.MAX_OUTPUT_CHARS:
+            return value
+        omitted = len(value) - TerminalTool.MAX_OUTPUT_CHARS
+        return value[: TerminalTool.MAX_OUTPUT_CHARS] + f"\n...<truncated {omitted} chars>"
 
     def execute(self, command: str, timeout: int = 120) -> dict[str, Any]:
         command = str(command).strip()
@@ -44,9 +55,6 @@ class TerminalTool(BaseTool):
         if self._BLOCKED.search(command):
             raise PermissionError("Terminal command contains a blocked operation.")
 
-        # ``type`` is a Windows file-reading alias. Hosted CI is Linux, where
-        # shell ``type`` has different semantics, so emulate the bounded
-        # contract directly on every platform.
         if executable == "type":
             parts = shlex.split(command, posix=True)
             target = parts[1] if len(parts) > 1 else ""
@@ -55,23 +63,46 @@ class TerminalTool(BaseTool):
             path = Path(target)
             try:
                 if path.is_file():
-                    return {"stdout": path.read_text(encoding="utf-8"), "stderr": "", "code": 0, "timed_out": False}
+                    return {"stdout": self._truncate(path.read_text(encoding="utf-8")), "stderr": "", "code": 0, "timed_out": False}
             except OSError as exc:
                 return {"stdout": "", "stderr": str(exc), "code": 1, "timed_out": False}
 
-        # ``mkdir`` is exposed as a terminal alias for compatibility, but
-        # directory creation is an idempotent workspace mutation. Implement
-        # it directly so an already-existing directory is a successful
-        # no-op instead of a shell error that can derail an otherwise valid
-        # agent task.
         if executable == "mkdir":
             parts = shlex.split(command, posix=True)
             targets = [part for part in parts[1:] if part not in {"-p", "--parents"}]
             if not targets:
                 raise ValueError("mkdir requires a directory path.")
             for target in targets:
-                Path(target).mkdir(parents=True, exist_ok=True)
+                path = Path(target)
+                resolved = path.resolve() if path.is_absolute() else (self.workspace / path).resolve()
+                if resolved != self.workspace and self.workspace not in resolved.parents:
+                    raise PermissionError("Terminal path escapes the configured workspace.")
+                resolved.mkdir(parents=True, exist_ok=True)
             return {"stdout": "", "stderr": "", "code": 0, "timed_out": False}
 
-        result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=timeout)
-        return {"stdout": result.stdout, "stderr": result.stderr, "code": result.returncode, "timed_out": False}
+        try:
+            result = subprocess.run(
+                command,
+                shell=True,
+                cwd=str(self.workspace),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+            stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+            return {
+                "stdout": self._truncate(stdout),
+                "stderr": self._truncate(stderr or f"Command timed out after {timeout} seconds."),
+                "code": 124,
+                "timed_out": True,
+                "timeout_seconds": timeout,
+            }
+        return {
+            "stdout": self._truncate(result.stdout),
+            "stderr": self._truncate(result.stderr),
+            "code": result.returncode,
+            "timed_out": False,
+        }
