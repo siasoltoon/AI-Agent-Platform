@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException
 
 from agent_core.runtime import AgentRuntime
 from backend.storage.task_store import TaskStore
+from config.production_config import CONFIG
 from task_engine.contracts import TaskRequest, TaskResponse, TaskStatus
 from task_engine.registry import CommandRegistry
 from task_engine.router import TaskRouter
@@ -46,6 +47,21 @@ async def _create_task(task: TaskRequest) -> TaskResponse:
     except (KeyError, TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail={"task_id": task_id, "message": "Invalid task command.", "error": str(exc)}) from exc
 
+    try:
+        queue_summary = TASK_STORE.summary(recent_limit=1)
+        queued = int(queue_summary.get("counts", {}).get("queued", 0))
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Task persistence is unavailable.") from exc
+    if queued >= CONFIG.max_queued_tasks:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "task_id": task_id,
+                "message": "Task queue capacity reached.",
+                "max_queued_tasks": CONFIG.max_queued_tasks,
+            },
+        )
+
     now = time.time()
     record = {
         "id": task_id,
@@ -62,6 +78,7 @@ async def _create_task(task: TaskRequest) -> TaskResponse:
             "prompt_length": len(task.prompt),
             "command": command,
             "timeout_seconds": task.timeout_seconds,
+            "queue_limit": CONFIG.max_queued_tasks,
         },
     }
     try:
