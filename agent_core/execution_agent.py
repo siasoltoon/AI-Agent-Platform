@@ -27,6 +27,10 @@ from tool_system.terminal_tools import TerminalTool
 class AgentExecutionError(RuntimeError):
     """Raised when the agent cannot produce or execute a valid action."""
 
+    def __init__(self, message: str, *, partial_result: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.partial_result = partial_result
+
 
 class AgentExecutor:
     """Execute tasks through a bounded plan/act/observe/verify loop."""
@@ -269,6 +273,23 @@ class AgentExecutor:
             "failed_tool_actions": len(failed),
         }
 
+    @staticmethod
+    def _result_from_records(actions: list[dict[str, Any]], records: list[dict[str, Any]], evidence: dict[str, Any], summary: str = "Task completed.") -> dict[str, Any]:
+        return {
+            "status": "completed",
+            "execution_mode": "agentic",
+            "summary": summary,
+            "steps": actions,
+            "execution_evidence": evidence,
+            "tool_records": records,
+        }
+
+    def _verified_result(self, task: str, actions: list[dict[str, Any]], records: list[dict[str, Any]], summary: str = "Task completed.") -> dict[str, Any] | None:
+        evidence = self._verify_evidence(task, records)
+        if evidence["verified"]:
+            return self._result_from_records(actions, records, evidence, summary)
+        return None
+
     def execute(self, task: str) -> dict[str, Any]:
         if not task or not task.strip():
             raise AgentExecutionError("Task cannot be empty.")
@@ -278,8 +299,7 @@ class AgentExecutor:
 Return exactly one JSON object per turn:
 {"action":"tool","tool":"TOOL_NAME","args":{...}} or {"action":"done","summary":"..."}
 
-Workspace tools: read_file, write_file, file_exists, directory_exists, list_directory, make_directory, search_files, copy_file, move_file, delete_file, file_hash.
-Execution tool: terminal. Terminal aliases include type, cat, dir, ls, pwd, where, findstr, fc, tree, more, echo, mkdir, mktemp, whoami, hostname, ver, date, time, python, py, pytest, pip, pip3, git, uvicorn, ruff, black, mypy, node, npm, npx, vite, yarn, pnpm, dotnet, java, javac, go, cargo, rustc.
+Workspace tools: read_file, write_file, file_exists, directory_exists, list_directory, make_directory, search_files, copy_file, move_file, delete_file, file_hash.\nExecution tool: terminal. Terminal aliases include type, cat, dir, ls, pwd, where, findstr, fc, tree, more, echo, mkdir, mktemp, whoami, hostname, ver, date, time, python, py, pytest, pip, pip3, git, uvicorn, ruff, black, mypy, node, npm, npx, vite, yarn, pnpm, dotnet, java, javac, go, cargo, rustc.
 
 Rules: stay inside workspace; inspect before risky changes; prefer dedicated tools; after every mutation ensure the resulting state is observable; for requested content verify exact equality; never claim completion without evidence; recover from transient failures when possible; return done only when evidence supports success.
 
@@ -304,9 +324,13 @@ The execution runtime independently validates the real filesystem and generated 
             try:
                 response = self.ollama.generate(conversation, timeout=self.ollama.timeout)
             except StopIteration as exc:
+                verified = self._verified_result(task, actions, records)
+                if verified:
+                    return verified
+                partial = self._result_from_records(actions, records, self._verify_evidence(task, records)) if records else None
                 if not records:
-                    raise AgentExecutionError("Agent stopped without executing any tool action.") from exc
-                raise AgentExecutionError("Agent stopped before producing a verified completion.") from exc
+                    raise AgentExecutionError("Agent stopped without executing any tool action.", partial_result=partial) from exc
+                raise AgentExecutionError("Agent stopped before producing a verified completion.", partial_result=partial) from exc
 
             try:
                 decision = self._normalize_decision(ActionParser.extract_object(response.get("response", "")))
@@ -333,14 +357,7 @@ The execution runtime independently validates the real filesystem and generated 
                 evidence = self._verify_evidence(task, records)
                 actions[-1]["verification"] = evidence
                 if evidence["verified"]:
-                    return {
-                        "status": "completed",
-                        "execution_mode": "agentic",
-                        "summary": str(decision.get("summary", "Task completed.")),
-                        "steps": actions,
-                        "execution_evidence": evidence,
-                        "tool_records": records,
-                    }
+                    return self._result_from_records(actions, records, evidence, str(decision.get("summary", "Task completed.")))
                 conversation += "\n\nVERIFICATION FAILED. Continue execution and repair or verify the observable state. Do not claim success yet."
                 if verification_requested and any(record.get("tool") == "write_file" and record.get("ok") is True for record in records) and not any(record.get("tool") == "read_file" and record.get("ok") is True for record in records):
                     conversation += "\n\nMANDATORY RECOVERY: A write was completed but direct read verification is missing. Your next action MUST be read_file on the exact file path that was written. Do not use done or another verification substitute."
@@ -372,4 +389,12 @@ The execution runtime independently validates the real filesystem and generated 
                 written_path = record.get("result", {}).get("path")
                 conversation += f"\n\nMANDATORY NEXT ACTION: The write to {written_path!r} succeeded. You MUST now call read_file for exactly that path and compare its returned content character-for-character with the requested content before any done action."
 
-        raise AgentExecutionError(f"Agent exceeded maximum execution steps ({self.max_steps}).")
+        verified = self._verified_result(task, actions, records)
+        if verified:
+            return verified
+        evidence = self._verify_evidence(task, records)
+        partial = self._result_from_records(actions, records, evidence) if records else None
+        raise AgentExecutionError(
+            f"Agent exceeded maximum execution steps ({self.max_steps}).",
+            partial_result=partial,
+        )
