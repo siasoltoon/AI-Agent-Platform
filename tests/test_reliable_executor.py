@@ -41,6 +41,24 @@ def test_quality_gate_rejects_complex_task_without_build():
     assert "requested_build_or_compile_not_executed_successfully" in blockers
 
 
+def test_quality_gate_rejects_failed_terminal_test_even_when_tool_ok():
+    prompt = """Build a production-quality application. Inspect the repository, implement the feature, add automated tests, run pytest, and verify the final result."""
+    result = _result(build=True)
+    result["tool_records"][-1]["result"]["code"] = 4
+    accepted, blockers = ReliableAgentExecutor._quality_gate(prompt, result)
+    assert accepted is False
+    assert "requested_tests_not_executed_successfully" in blockers
+
+
+def test_quality_gate_rejects_timed_out_terminal_test_even_when_tool_ok():
+    prompt = """Build a production-quality application. Inspect the repository, implement the feature, add automated tests, run pytest, and verify the final result."""
+    result = _result(build=True)
+    result["tool_records"][-1]["result"]["timed_out"] = True
+    accepted, blockers = ReliableAgentExecutor._quality_gate(prompt, result)
+    assert accepted is False
+    assert "requested_tests_not_executed_successfully" in blockers
+
+
 def test_continuation_prompt_preserves_original_task_and_failure():
     executor = ReliableAgentExecutor.__new__(ReliableAgentExecutor)
     executor.max_output_chars = 12000
