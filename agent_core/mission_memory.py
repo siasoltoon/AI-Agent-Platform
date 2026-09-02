@@ -23,6 +23,7 @@ class MissionMemory:
     checkpoints: list[dict[str, Any]] = field(default_factory=list)
     task_attempts: dict[str, int] = field(default_factory=dict)
     last_execution: dict[str, Any] = field(default_factory=dict)
+    execution_evidence: dict[str, Any] = field(default_factory=dict)
 
     VALID_STATUSES = {"pending", "running", "completed", "blocked", "cancelled", "interrupted"}
     TERMINAL_STATUSES = {"completed", "cancelled"}
@@ -72,8 +73,11 @@ class MissionMemory:
         self.task_attempts[step_id] = max(int(attempt), self.task_attempts.get(step_id, 0))
 
     def record_execution(self, result: dict[str, Any]) -> None:
-        """Keep the last real runtime result for final acceptance and diagnostics."""
+        """Keep the last real runtime result and its measured evidence for acceptance/recovery."""
         self.last_execution = result
+        evidence = result.get("execution_evidence")
+        if isinstance(evidence, dict):
+            self.execution_evidence = dict(evidence)
 
     def snapshot(self) -> dict[str, Any]:
         return asdict(self)
@@ -118,4 +122,5 @@ class MissionMemoryStore:
             checkpoints=list(payload.get("checkpoints", [])),
             task_attempts={key: int(value) for key, value in payload.get("task_attempts", {}).items()},
             last_execution=dict(payload.get("last_execution", {})),
+            execution_evidence=dict(payload.get("execution_evidence", {})),
         )
