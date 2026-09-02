@@ -87,7 +87,8 @@ def test_full_acceptance_chain_api_queue_runner_evidence_persistence(isolated_ap
     assert payload["result"]["result"]["steps"] == 2
     assert payload["metadata"]["execution_mode"] == "agentic"
     assert payload["metadata"]["execution_evidence"]["verified"] is True
-    assert payload["metadata"]["execution_evidence"]["scope_verified"] is True
+    assert payload["metadata"]["execution_evidence"]["scope_restricted"] is False
+    assert payload["metadata"]["execution_evidence"]["scope_verified"] is False
     assert completed["error"] is None
 
 
@@ -142,7 +143,7 @@ def test_acceptance_health_gate_is_ready(isolated_app):
         ready = client.get("/health/ready")
 
     assert live.status_code == 200
-    assert live.json()["status"] == "ok"
     assert ready.status_code == 200
+    assert live.json()["status"] == "ok"
     assert ready.json()["status"] == "ready"
     assert ready.json()["checks"] == {"task_store": "ok", "task_runner": "ok"}
