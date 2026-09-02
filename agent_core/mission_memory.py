@@ -13,6 +13,7 @@ class MissionMemory:
     mission_id: str
     objective: str
     architecture: str = ""
+    status: str = "pending"
     decisions: list[str] = field(default_factory=list)
     completed: list[str] = field(default_factory=list)
     pending: list[str] = field(default_factory=list)
@@ -22,6 +23,23 @@ class MissionMemory:
     checkpoints: list[dict[str, Any]] = field(default_factory=list)
     task_attempts: dict[str, int] = field(default_factory=dict)
     last_execution: dict[str, Any] = field(default_factory=dict)
+
+    VALID_STATUSES = {"pending", "running", "completed", "blocked", "cancelled", "interrupted"}
+    TERMINAL_STATUSES = {"completed", "blocked", "cancelled"}
+
+    def __post_init__(self) -> None:
+        if not self.mission_id.strip() or not self.objective.strip():
+            raise ValueError("mission_id and objective are required")
+        if self.status not in self.VALID_STATUSES:
+            raise ValueError(f"Invalid mission status: {self.status}")
+
+    def transition(self, status: str) -> None:
+        """Apply a durable lifecycle transition without silently reopening terminal missions."""
+        if status not in self.VALID_STATUSES:
+            raise ValueError(f"Invalid mission status: {status}")
+        if self.status in self.TERMINAL_STATUSES and status != self.status:
+            raise ValueError(f"Terminal mission cannot transition from {self.status} to {status}")
+        self.status = status
 
     def checkpoint(
         self,
@@ -80,6 +98,7 @@ class MissionMemoryStore:
             mission_id=payload["mission_id"],
             objective=payload["objective"],
             architecture=payload.get("architecture", ""),
+            status=payload.get("status", "pending"),
             decisions=list(payload.get("decisions", [])),
             completed=list(payload.get("completed", [])),
             pending=list(payload.get("pending", [])),
