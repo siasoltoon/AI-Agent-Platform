@@ -217,6 +217,33 @@ class TaskStore:
             connection.commit()
             return self._decode(connection.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone())
 
+    def resume_completed(self, task_id: str) -> dict[str, Any]:
+        """Explicitly requeue a completed task while preserving its durable task identity."""
+        with self._lock, self._connect() as connection:
+            row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            if str(row["status"]) != "completed":
+                raise ValueError(f"Task is not resumable: {row['status']}")
+
+            metadata = json.loads(row["metadata_json"])
+            metadata["resume_count"] = int(metadata.get("resume_count", 0)) + 1
+            metadata["last_resumed_at"] = time.time()
+            metadata["resumed_from_status"] = "completed"
+            connection.execute(
+                "UPDATE tasks SET status='queued', started_at=NULL, completed_at=NULL, error=NULL, metadata_json=? WHERE id=? AND status='completed'",
+                (json.dumps(metadata, ensure_ascii=False, default=str), task_id),
+            )
+            self._record_event(
+                connection,
+                task_id,
+                "manual_resume_queued",
+                status="queued",
+                detail={"resume_count": metadata["resume_count"], "previous_status": "completed"},
+            )
+            connection.commit()
+            return self._decode(connection.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone())
+
     def cancel(self, task_id: str, *, reason: str = "Cancelled by user.") -> dict[str, Any]:
         with self._lock, self._connect() as connection:
             row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
