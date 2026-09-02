@@ -57,15 +57,35 @@ class AdaptivePlanner:
             FailureClass.UNKNOWN: "inspect_failure_evidence_before_retry",
         }[category]
 
+    @staticmethod
+    def _is_recovery_task(task_id: str) -> bool:
+        """Recovery work is deliberately terminal for adaptive expansion.
+
+        Diagnosis/repair tasks may be retried by the normal bounded retry loop,
+        but a failure inside recovery work must not recursively create another
+        diagnosis/repair chain. This preserves the graph bound and guarantees
+        that an unrecoverable recovery path eventually becomes blocked instead
+        of consuming the entire task budget.
+        """
+        parts = task_id.split(":")
+        return "diagnose" in parts or "repair" in parts
+
     def expand_after_failure(
         self,
         graph: TaskGraph,
         failed_task_id: str,
         error: BaseException | str,
     ) -> list[GraphTask]:
-        """Add bounded diagnosis/repair work that must complete before the failed task retries."""
+        """Add bounded diagnosis/repair work that must complete before retry.
+
+        Only original mission tasks may spawn recovery work. Recovery tasks can
+        still be retried by the caller, but never recursively expanded.
+        """
         if failed_task_id not in graph.tasks:
             raise KeyError(failed_task_id)
+        if self._is_recovery_task(failed_task_id):
+            return []
+
         category = classify_failure(error)
         if category in {FailureClass.BLOCKING, FailureClass.VALIDATION}:
             return []
@@ -74,6 +94,8 @@ class AdaptivePlanner:
         diagnosis_id = f"{failed_task_id}:diagnose:{attempt}"
         repair_id = f"{failed_task_id}:repair:{attempt}"
         if diagnosis_id in graph.tasks or repair_id in graph.tasks:
+            return []
+        if len(graph.tasks) + 2 > self.MAX_TASKS:
             return []
 
         original = graph.tasks[failed_task_id]
