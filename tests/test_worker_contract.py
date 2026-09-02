@@ -129,3 +129,82 @@ def test_worker_honors_smaller_requested_agent_step_budget(monkeypatch):
     Worker("test-worker").execute({"prompt": "hello", "metadata": {"max_agent_steps": 8}})
 
     assert captured["max_steps"] == 8
+
+
+def test_worker_replays_completed_task_id_without_reexecuting(monkeypatch):
+    calls = []
+
+    class FakeService:
+        def __init__(self, **kwargs):
+            pass
+
+    class FakeExecutor:
+        def __init__(self, service, workspace_root=None, max_steps=None):
+            pass
+
+        def execute(self, prompt):
+            calls.append(prompt)
+            return {
+                "status": "completed",
+                "execution_evidence": {"verified": True},
+                "tool_records": [{"tool": "write_file", "ok": True}],
+            }
+
+    import worker_system.worker as worker_module
+
+    monkeypatch.setattr(worker_module, "OllamaService", FakeService)
+    monkeypatch.setattr(worker_module, "AgentExecutor", FakeExecutor)
+
+    worker = Worker("test-worker")
+    first = worker.execute({"task_id": "mission:task:1", "prompt": "write once", "metadata": {}})
+    second = worker.execute({"task_id": "mission:task:1", "prompt": "write again", "metadata": {}})
+
+    assert calls == ["write once"]
+    assert first["result"] == second["result"]
+    assert first["idempotency"] == {"key": "mission:task:1", "replayed": False}
+    assert second["idempotency"] == {"key": "mission:task:1", "replayed": False}
+
+
+def test_worker_rejects_duplicate_task_id_while_execution_is_in_progress(monkeypatch):
+    import threading
+
+    started = threading.Event()
+    release = threading.Event()
+
+    class FakeService:
+        def __init__(self, **kwargs):
+            pass
+
+    class FakeExecutor:
+        def __init__(self, service, workspace_root=None, max_steps=None):
+            pass
+
+        def execute(self, prompt):
+            started.set()
+            release.wait(timeout=2)
+            return {"status": "completed", "execution_evidence": {"verified": True}}
+
+    import worker_system.worker as worker_module
+
+    monkeypatch.setattr(worker_module, "OllamaService", FakeService)
+    monkeypatch.setattr(worker_module, "AgentExecutor", FakeExecutor)
+
+    worker = Worker("test-worker")
+    errors = []
+
+    def run():
+        try:
+            worker.execute({"task_id": "mission:task:2", "prompt": "run", "metadata": {}})
+        except Exception as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    assert started.wait(timeout=1)
+
+    with pytest.raises(RuntimeError, match="already in progress"):
+        worker.execute({"task_id": "mission:task:2", "prompt": "duplicate", "metadata": {}})
+
+    release.set()
+    thread.join(timeout=2)
+    assert errors == []
