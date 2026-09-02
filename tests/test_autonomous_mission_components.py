@@ -39,6 +39,39 @@ def test_memory_checkpoint_round_trip():
     assert restored.last_execution["status"] == "completed"
 
 
+def test_mission_lifecycle_is_durable_and_terminal_states_are_protected():
+    memory = MissionMemory("m2", "harden agent")
+    assert memory.status == "pending"
+    memory.transition("running")
+    memory.transition("interrupted")
+    memory.transition("running")
+    memory.transition("blocked")
+    memory.transition("running")
+    memory.transition("completed")
+    assert memory.snapshot()["status"] == "completed"
+    try:
+        memory.transition("running")
+    except ValueError as exc:
+        assert "terminal" in str(exc).lower()
+    else:
+        raise AssertionError("terminal mission must not be reopened")
+
+
+def test_blocked_mission_can_be_resumed():
+    memory = MissionMemory("m3", "resume mission", status="blocked")
+    memory.transition("running")
+    assert memory.status == "running"
+
+
+def test_invalid_mission_status_is_rejected():
+    try:
+        MissionMemory("m4", "invalid status", status="unknown")
+    except ValueError as exc:
+        assert "invalid mission status" in str(exc).lower()
+    else:
+        raise AssertionError("invalid status must be rejected")
+
+
 def test_context_is_bounded_and_preserves_critical_mission_fields():
     manager = MissionContextManager(max_chars=220, chunk_chars=50)
     context = manager.build(
