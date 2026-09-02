@@ -138,10 +138,17 @@ def test_agent_executor_accepts_windows_type_alias(tmp_path: Path):
     assert "alias works" in result["tool_records"][0]["result"]["stdout"]
 
 
-def test_agent_executor_rejects_completion_without_execution(tmp_path: Path):
-    ollama = FakeOllama(['{"action":"done","summary":"Pretended to finish"}'])
-    with pytest.raises(AgentExecutionError, match="without executing"):
-        AgentExecutor(ollama, workspace_root=str(tmp_path)).execute("Create hello.txt")
+def test_agent_executor_recovers_from_premature_completion_without_execution(tmp_path: Path):
+    ollama = FakeOllama([
+        '{"action":"done","summary":"Pretended to finish"}',
+        '{"action":"write_file","args":{"path":"hello.txt","content":"recovered"}}',
+        '{"action":"done","summary":"Recovered after premature completion"}',
+    ])
+    result = AgentExecutor(ollama, workspace_root=str(tmp_path), max_steps=3).execute("Create hello.txt")
+    assert result["status"] == "completed"
+    assert (tmp_path / "hello.txt").read_text(encoding="utf-8") == "recovered"
+    assert result["tool_records"][0]["tool"] == "write_file"
+    assert "PREMATURE COMPLETION REJECTED" in ollama.prompts[1]
 
 
 def test_agent_executor_recovers_from_tool_failure(tmp_path: Path):
