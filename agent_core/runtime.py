@@ -8,7 +8,7 @@ from backend.services.worker_client import WorkerClient
 from config.worker_config import DEFAULT_MODEL, LARGE_TASK_THRESHOLD, LARGE_TASK_TIMEOUT, WORKER_HOST, WORKER_PORT, WORKER_TIMEOUT
 
 MAX_RUNTIME_TIMEOUT = 1800
-DEFAULT_LARGE_AGENT_STEPS = 32
+DEFAULT_LARGE_AGENT_STEPS = 64
 DEFAULT_NORMAL_AGENT_STEPS = 32
 
 
@@ -55,13 +55,13 @@ class AgentRuntime:
         selected_timeout = self._bounded_timeout(int(timeout_seconds) if timeout_seconds is not None else int(self.large_task_timeout if is_large else self.timeout))
         execution_metadata = dict(metadata or {})
         configured_steps = execution_metadata.get("max_agent_steps")
+        maximum = DEFAULT_LARGE_AGENT_STEPS if is_large else DEFAULT_NORMAL_AGENT_STEPS
         if configured_steps is None:
-            configured_steps = DEFAULT_LARGE_AGENT_STEPS if is_large else DEFAULT_NORMAL_AGENT_STEPS
+            configured_steps = maximum
         try:
             requested_steps = int(configured_steps)
         except (TypeError, ValueError) as exc:
             raise ValueError("max_agent_steps must be an integer.") from exc
-        maximum = DEFAULT_LARGE_AGENT_STEPS if is_large else DEFAULT_NORMAL_AGENT_STEPS
         if requested_steps < 1 or requested_steps > maximum:
             raise ValueError(f"max_agent_steps must be between 1 and {maximum} for this execution profile.")
         execution_metadata["max_agent_steps"] = requested_steps
