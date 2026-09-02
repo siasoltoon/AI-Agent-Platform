@@ -34,11 +34,14 @@ class AcceptanceRouter:
                     "verified": True,
                     "checks": [
                         {"type": "file_exists", "path": "acceptance.txt", "passed": True},
+                        {"type": "read_verified_exists", "path": "acceptance.txt", "passed": True},
                         {"type": "file_content_matches_write", "path": "acceptance.txt", "passed": True},
+                        {"type": "read_content_matches_write", "path": "acceptance.txt", "passed": True},
                     ],
                 },
                 "tool_records": [
-                    {"ok": True, "tool": "write_file", "result": {"path": "acceptance.txt", "content": "accepted"}}
+                    {"ok": True, "tool": "write_file", "result": {"path": "acceptance.txt", "content": "accepted"}},
+                    {"ok": True, "tool": "read_file", "result": {"path": "acceptance.txt", "content": "accepted"}},
                 ],
                 "steps": 2,
             },
