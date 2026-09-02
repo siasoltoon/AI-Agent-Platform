@@ -13,6 +13,10 @@ from typing import Any, Iterator
 from task_engine.lifecycle import validate_transition
 
 
+class TaskQueueCapacityError(RuntimeError):
+    """Raised when an atomic queued-task capacity check rejects a new task."""
+
+
 class TaskStore:
     """Persist task lifecycle state and an append-only execution audit trail."""
 
@@ -77,9 +81,15 @@ class TaskStore:
             (task_id, time.time(), event_type, status, json.dumps(detail, ensure_ascii=False, default=str) if detail is not None else None),
         )
 
-    def create(self, task: dict[str, Any]) -> None:
+    def create(self, task: dict[str, Any], *, max_queued_tasks: int | None = None) -> None:
         status = str(task["status"])
         with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if max_queued_tasks is not None:
+                limit = max(1, int(max_queued_tasks))
+                queued = int(connection.execute("SELECT COUNT(*) FROM tasks WHERE status='queued'").fetchone()[0])
+                if status == "queued" and queued >= limit:
+                    raise TaskQueueCapacityError(f"Task queue capacity reached: {limit}.")
             connection.execute(
                 "INSERT INTO tasks (id,prompt,model,status,created_at,started_at,completed_at,result_json,error,metadata_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (task["id"], task["prompt"], task.get("model"), status, task["created_at"], task.get("started_at"), task.get("completed_at"), json.dumps(task.get("result"), ensure_ascii=False, default=str), task.get("error"), json.dumps(task.get("metadata", {}), ensure_ascii=False, default=str)),
