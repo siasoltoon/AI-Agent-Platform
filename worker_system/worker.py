@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 import threading
 import time
 import traceback
+from collections import OrderedDict
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
@@ -26,6 +28,7 @@ MAX_TIMEOUT_SECONDS = 1800
 MAX_METADATA_KEYS = 64
 MAX_NORMAL_AGENT_STEPS = 32
 MAX_LARGE_AGENT_STEPS = 64
+MAX_IDEMPOTENCY_ENTRIES = 256
 # Published worker ceiling. Normal missions default to 32; large missions may use 64.
 MAX_AGENT_STEPS = MAX_LARGE_AGENT_STEPS
 
@@ -75,9 +78,57 @@ class Worker:
         self.last_completed_at: float | None = None
         self.last_error: str | None = None
         self._execution_lock = threading.Lock()
+        self._idempotency_lock = threading.Lock()
+        self._completed_results: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._inflight_task_ids: set[str] = set()
+
+    def _cached_result(self, task_id: str | None) -> dict[str, Any] | None:
+        if not task_id:
+            return None
+        with self._idempotency_lock:
+            cached = self._completed_results.get(task_id)
+            if cached is None:
+                return None
+            self._completed_results.move_to_end(task_id)
+            return copy.deepcopy(cached)
+
+    def _claim_task_id(self, task_id: str | None) -> dict[str, Any] | None:
+        if not task_id:
+            return None
+        with self._idempotency_lock:
+            cached = self._completed_results.get(task_id)
+            if cached is not None:
+                self._completed_results.move_to_end(task_id)
+                return copy.deepcopy(cached)
+            if task_id in self._inflight_task_ids:
+                raise RuntimeError(f"Execution for task_id={task_id} is already in progress; duplicate execution rejected.")
+            self._inflight_task_ids.add(task_id)
+        return None
+
+    def _store_result(self, task_id: str | None, result: dict[str, Any]) -> None:
+        if not task_id:
+            return
+        with self._idempotency_lock:
+            self._inflight_task_ids.discard(task_id)
+            self._completed_results[task_id] = copy.deepcopy(result)
+            self._completed_results.move_to_end(task_id)
+            while len(self._completed_results) > MAX_IDEMPOTENCY_ENTRIES:
+                self._completed_results.popitem(last=False)
+
+    def _release_task_id(self, task_id: str | None) -> None:
+        if task_id:
+            with self._idempotency_lock:
+                self._inflight_task_ids.discard(task_id)
 
     def execute(self, job: dict[str, Any]) -> dict[str, Any]:
+        task_id = str(job.get("task_id") or "").strip() or None
+        cached = self._claim_task_id(task_id)
+        if cached is not None:
+            logger.info("Returning cached idempotent result for task_id=%s", task_id)
+            return cached
+
         if not self._execution_lock.acquire(blocking=False):
+            self._release_task_id(task_id)
             raise RuntimeError("Worker is busy executing another task.")
         self.status = "running"
         self.started_at = time.time()
@@ -115,7 +166,7 @@ class Worker:
 
             logger.info(
                 "Executing task_id=%s model=%s prompt_length=%s timeout=%s mode=agentic-reliable profile=%s max_agent_steps=%s self_repair_attempts=%s",
-                job.get("task_id"), model, len(prompt), timeout, execution_profile, requested_steps, ReliableAgentExecutor.MAX_ATTEMPTS,
+                task_id, model, len(prompt), timeout, execution_profile, requested_steps, ReliableAgentExecutor.MAX_ATTEMPTS,
             )
             service = OllamaService(base_url=OLLAMA_HOST, model=model, timeout=timeout)
             executor = AgentExecutor(
@@ -129,18 +180,22 @@ class Worker:
                 raise AgentExecutionError("Agent execution completed without verified execution evidence.")
 
             self.last_completed_at = time.time()
-            return {
+            response = {
                 "status": "completed",
                 "worker_id": self.worker_id,
-                "task_id": job.get("task_id"),
+                "task_id": task_id,
                 "model": model,
                 "execution_profile": execution_profile,
                 "max_agent_steps": requested_steps,
                 "result": result,
                 "resource_snapshot": resource_snapshot(),
+                "idempotency": {"key": task_id, "replayed": False},
             }
+            self._store_result(task_id, response)
+            return response
         except Exception as exc:
             self.last_error = str(exc)
+            self._release_task_id(task_id)
             raise
         finally:
             self.status = "idle"
@@ -167,6 +222,7 @@ def health() -> dict[str, Any]:
         "normal_agent_steps": MAX_NORMAL_AGENT_STEPS,
         "large_agent_steps": MAX_LARGE_AGENT_STEPS,
         "self_repair_attempts": ReliableAgentExecutor.MAX_ATTEMPTS,
+        "idempotency": {"enabled": True, "scope": "worker-process", "max_entries": MAX_IDEMPOTENCY_ENTRIES},
         "last_completed_at": worker.last_completed_at,
         "last_error": worker.last_error,
         "resources": resource_snapshot(),
