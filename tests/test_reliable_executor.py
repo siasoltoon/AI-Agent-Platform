@@ -1,3 +1,4 @@
+from agent_core.execution_agent import AgentExecutionError
 from agent_core.reliable_executor import ReliableAgentExecutor
 
 
@@ -36,3 +37,34 @@ def test_continuation_prompt_preserves_original_task_and_failure():
     assert "Build the application and run tests." in prompt
     assert "pytest failed" in prompt
     assert "Inspect the current workspace" in prompt
+
+
+def test_execute_carries_partial_result_into_recovery_prompt(monkeypatch, tmp_path):
+    partial = _result(tests=False)
+    prompts = []
+
+    class FakeExecutor:
+        calls = 0
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def execute(self, prompt):
+            prompts.append(prompt)
+            self.calls += 1
+            if self.calls == 1:
+                raise AgentExecutionError("Agent stopped before producing a verified completion.", partial_result=partial)
+            return _result(tests=True)
+
+    monkeypatch.setattr("agent_core.reliable_executor.AgentExecutor", FakeExecutor)
+    executor = ReliableAgentExecutor(
+        ollama=object(),
+        workspace_root=str(tmp_path),
+        max_steps=4,
+        max_attempts=2,
+    )
+    result = executor.execute("Build the application and run pytest.")
+    assert result["status"] == "completed"
+    assert result["reliability"]["attempts"] == 2
+    assert "print('ok')" in prompts[1]
+    assert "No usable previous result was returned." not in prompts[1]
