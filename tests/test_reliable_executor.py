@@ -2,8 +2,12 @@ from agent_core.execution_agent import AgentExecutionError
 from agent_core.reliable_executor import ReliableAgentExecutor
 
 
-def _result(*, tests=True):
-    commands = ["python -m pytest -q"] if tests else []
+def _result(*, tests=True, build=False):
+    commands = []
+    if build:
+        commands.append("python -m py_compile app.py")
+    if tests:
+        commands.append("python -m pytest -q")
     records = [
         {"step": 1, "tool": "write_file", "ok": True, "result": {"path": "app.py", "content": "print('ok')"}},
         {"step": 2, "tool": "read_file", "ok": True, "result": {"path": "app.py", "content": "print('ok')"}},
@@ -18,16 +22,23 @@ def _result(*, tests=True):
 
 def test_quality_gate_accepts_verified_complex_test_task():
     prompt = """Build a production-quality application. Inspect the repository, implement the feature, add automated tests, run pytest, and verify the final result."""
-    accepted, blockers = ReliableAgentExecutor._quality_gate(prompt, _result())
+    accepted, blockers = ReliableAgentExecutor._quality_gate(prompt, _result(build=True))
     assert accepted is True
     assert blockers == []
 
 
 def test_quality_gate_rejects_complex_task_without_tests():
     prompt = """Build a production-quality application. Inspect the repository, implement the feature, add automated tests, run pytest, and verify the final result."""
-    accepted, blockers = ReliableAgentExecutor._quality_gate(prompt, _result(tests=False))
+    accepted, blockers = ReliableAgentExecutor._quality_gate(prompt, _result(tests=False, build=True))
     assert accepted is False
     assert "requested_tests_not_executed_successfully" in blockers
+
+
+def test_quality_gate_rejects_complex_task_without_build():
+    prompt = """Build a production-quality application. Inspect the repository, implement the feature, add automated tests, run pytest, and verify the final result."""
+    accepted, blockers = ReliableAgentExecutor._quality_gate(prompt, _result(build=False))
+    assert accepted is False
+    assert "requested_build_or_compile_not_executed_successfully" in blockers
 
 
 def test_continuation_prompt_preserves_original_task_and_failure():
@@ -40,7 +51,7 @@ def test_continuation_prompt_preserves_original_task_and_failure():
 
 
 def test_execute_carries_partial_result_into_recovery_prompt(monkeypatch, tmp_path):
-    partial = _result(tests=False)
+    partial = _result(tests=False, build=False)
     prompts = []
 
     class FakeExecutor:
@@ -54,7 +65,7 @@ def test_execute_carries_partial_result_into_recovery_prompt(monkeypatch, tmp_pa
             type(self).calls += 1
             if type(self).calls == 1:
                 raise AgentExecutionError("Agent stopped before producing a verified completion.", partial_result=partial)
-            return _result(tests=True)
+            return _result(tests=True, build=True)
 
     monkeypatch.setattr("agent_core.reliable_executor.AgentExecutor", FakeExecutor)
     executor = ReliableAgentExecutor(
