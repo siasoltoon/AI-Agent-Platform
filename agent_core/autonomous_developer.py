@@ -120,6 +120,18 @@ class AutonomousDeveloper:
         elif memory.objective.strip() != objective:
             raise ValueError("A persisted mission cannot be resumed with a different objective.")
 
+        if memory.status == "completed":
+            return {
+                "mission_id": mission_id,
+                "status": "completed",
+                "verified": True,
+                "completed_tasks": list(memory.completed),
+                "memory": memory.snapshot(),
+            }
+        if memory.status == "cancelled":
+            return {"mission_id": mission_id, "status": "cancelled", "memory": memory.snapshot()}
+        memory.transition("running")
+
         graph = self._initial_graph(objective)
         self._restore_graph(graph, memory)
         memory.pending = [task.task_id for task in graph.tasks.values() if task.status != "completed"]
@@ -129,6 +141,8 @@ class AutonomousDeveloper:
             ready = graph.ready()
             if not ready:
                 blockers = [task.task_id for task in graph.tasks.values() if task.status == "blocked"]
+                memory.transition("blocked")
+                self.memory_store.save(memory)
                 return {"mission_id": mission_id, "status": "blocked", "blockers": blockers, "memory": memory.snapshot()}
 
             for task in list(ready):
@@ -199,6 +213,7 @@ class AutonomousDeveloper:
                         if category is FailureClass.BLOCKING or offset == retries:
                             graph.mark_blocked(task.task_id)
                             memory.pending = [t.task_id for t in graph.tasks.values() if t.status != "completed"]
+                            memory.transition("blocked")
                             self.memory_store.save(memory)
                             return {
                                 "mission_id": mission_id,
@@ -211,6 +226,8 @@ class AutonomousDeveloper:
                 if not completed and graph.tasks[task.task_id].status == "pending":
                     continue
                 if not completed:
+                    memory.transition("blocked")
+                    self.memory_store.save(memory)
                     return {"mission_id": mission_id, "status": "blocked", "task": self._root_task_id(task.task_id), "memory": memory.snapshot()}
 
         last_execution = memory.last_execution
@@ -224,6 +241,8 @@ class AutonomousDeveloper:
             execution_result=last_execution if final_verification.verified else None,
         )
         if not gate.accepted:
+            memory.transition("blocked")
+            self.memory_store.save(memory)
             return {
                 "mission_id": mission_id,
                 "status": "blocked",
@@ -231,6 +250,7 @@ class AutonomousDeveloper:
                 "memory": memory.snapshot(),
             }
         memory.pending = []
+        memory.transition("completed")
         self.memory_store.save(memory)
         return {
             "mission_id": mission_id,
