@@ -162,7 +162,7 @@ def test_worker_replays_completed_task_id_without_reexecuting(monkeypatch):
     assert calls == ["write once"]
     assert first["result"] == second["result"]
     assert first["idempotency"] == {"key": "mission:task:1", "replayed": False}
-    assert second["idempotency"] == {"key": "mission:task:1", "replayed": False}
+    assert second["idempotency"] == {"key": "mission:task:1", "replayed": True}
 
 
 def test_worker_rejects_duplicate_task_id_while_execution_is_in_progress(monkeypatch):
