@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import shlex
 import subprocess
 from pathlib import Path
@@ -26,10 +25,11 @@ class TerminalTool(BaseTool):
         "npm.cmd": "npm", "pytest.exe": "pytest", "python.exe": "python",
         "node.exe": "node", "npm.exe": "npm", "git.exe": "git",
     }
-    _BLOCKED = re.compile(
-        r"(?:\b(?:del|erase|format|shutdown|restart|taskkill|diskpart|reg|powershell|pwsh|cmd|rmdir|rd)\b|"
-        r"[;&|><`]|(?:\b(?:rm|sudo|chmod|chown)\b))", re.IGNORECASE,
-    )
+    _BLOCKED_COMMANDS = {
+        "del", "erase", "format", "shutdown", "restart", "taskkill", "diskpart", "reg",
+        "powershell", "pwsh", "cmd", "rmdir", "rd", "rm", "sudo", "chmod", "chown",
+    }
+    _SHELL_OPERATORS = frozenset(";&|><`")
     MAX_OUTPUT_CHARS = 12_000
 
     def __init__(self, workspace_root: str | Path | None = None) -> None:
@@ -42,6 +42,36 @@ class TerminalTool(BaseTool):
         omitted = len(value) - TerminalTool.MAX_OUTPUT_CHARS
         return value[: TerminalTool.MAX_OUTPUT_CHARS] + f"\n...<truncated {omitted} chars>"
 
+    @classmethod
+    def _contains_blocked_shell_syntax(cls, command: str) -> bool:
+        quote: str | None = None
+        escaped = False
+        for char in command:
+            if escaped:
+                escaped = False
+                continue
+            if char == "\\" and quote != "'":
+                escaped = True
+                continue
+            if quote:
+                if char == quote:
+                    quote = None
+                continue
+            if char in {"'", '"'}:
+                quote = char
+                continue
+            if char in cls._SHELL_OPERATORS:
+                return True
+        return quote is not None
+
+    @classmethod
+    def _contains_blocked_command(cls, command: str) -> bool:
+        try:
+            tokens = shlex.split(command, posix=True)
+        except ValueError:
+            return True
+        return any(token.lower() in cls._BLOCKED_COMMANDS for token in tokens)
+
     def execute(self, command: str, timeout: int = 120) -> dict[str, Any]:
         command = str(command).strip()
         if not command:
@@ -52,7 +82,7 @@ class TerminalTool(BaseTool):
         executable = command.split()[0].strip('"\'').lower()
         if executable not in self._ALLOWED:
             raise PermissionError(f"Terminal command is not allowed: {executable}")
-        if self._BLOCKED.search(command):
+        if self._contains_blocked_shell_syntax(command) or self._contains_blocked_command(command):
             raise PermissionError("Terminal command contains a blocked operation.")
 
         if executable == "type":
