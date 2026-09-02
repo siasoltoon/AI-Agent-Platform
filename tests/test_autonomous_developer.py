@@ -1,5 +1,5 @@
 from agent_core.autonomous_developer import AutonomousDeveloper
-from agent_core.mission_memory import MissionMemoryStore
+from agent_core.mission_memory import MissionMemory, MissionMemoryStore
 
 
 class FakeRuntime:
@@ -40,7 +40,7 @@ def test_autonomous_developer_resumes_completed_steps_without_repeating_them():
     memory = store.load("missing")
     assert memory is None
 
-    memory = __import__("agent_core.mission_memory", fromlist=["MissionMemory"]).MissionMemory("m3", "build a bot")
+    memory = MissionMemory("m3", "build a bot")
     memory.completed = ["recon", "architecture", "implementation"]
     memory.task_attempts = {"recon": 1, "architecture": 1, "implementation": 2}
     store.save(memory)
