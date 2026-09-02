@@ -25,7 +25,7 @@ class MissionMemory:
     last_execution: dict[str, Any] = field(default_factory=dict)
 
     VALID_STATUSES = {"pending", "running", "completed", "blocked", "cancelled", "interrupted"}
-    TERMINAL_STATUSES = {"completed", "blocked", "cancelled"}
+    TERMINAL_STATUSES = {"completed", "cancelled"}
 
     def __post_init__(self) -> None:
         if not self.mission_id.strip() or not self.objective.strip():
