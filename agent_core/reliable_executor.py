@@ -189,6 +189,9 @@ The goal of this recovery attempt is to finish the ORIGINAL MISSION, not to expl
                     return result
                 last_error = "Completion quality gate rejected the attempt: " + ", ".join(blockers)
             except Exception as exc:
+                partial = getattr(exc, "partial_result", None)
+                if isinstance(partial, dict):
+                    last_result = partial
                 last_error = f"{type(exc).__name__}: {exc}"
                 attempt_records.append({"attempt": attempt, "accepted": False, "error": last_error})
 
