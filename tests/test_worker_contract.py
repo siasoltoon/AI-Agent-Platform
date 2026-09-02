@@ -53,7 +53,7 @@ def test_worker_request_rejects_too_many_metadata_keys():
 
 
 def test_worker_agent_steps_are_explicitly_bounded():
-    assert MAX_AGENT_STEPS == 32
+    assert MAX_AGENT_STEPS == 64
 
 
 def test_worker_defaults_agent_steps_to_published_contract(monkeypatch):
