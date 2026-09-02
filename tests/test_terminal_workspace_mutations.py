@@ -9,7 +9,7 @@ def test_mkdir_is_idempotent_when_directory_already_exists(tmp_path: Path):
     target = tmp_path / "telegram_bot"
     target.mkdir()
 
-    result = TerminalTool().execute(f'mkdir "{target}"')
+    result = TerminalTool(workspace_root=tmp_path).execute('mkdir "telegram_bot"')
 
     assert result["code"] == 0
     assert result["timed_out"] is False
@@ -19,7 +19,7 @@ def test_mkdir_is_idempotent_when_directory_already_exists(tmp_path: Path):
 def test_mkdir_creates_missing_nested_directories(tmp_path: Path):
     target = tmp_path / "telegram_bot" / "src" / "handlers"
 
-    result = TerminalTool().execute(f'mkdir "{target}"')
+    result = TerminalTool(workspace_root=tmp_path).execute('mkdir "telegram_bot/src/handlers"')
 
     assert result["code"] == 0
     assert target.is_dir()
