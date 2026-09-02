@@ -290,6 +290,12 @@ class AgentExecutor:
             return self._result_from_records(actions, records, evidence, summary)
         return None
 
+    def _partial_result(self, task: str, actions: list[dict[str, Any]], records: list[dict[str, Any]]) -> dict[str, Any] | None:
+        """Build a recovery-safe snapshot whenever execution fails after real work."""
+        if not records:
+            return None
+        return self._result_from_records(actions, records, self._verify_evidence(task, records))
+
     def execute(self, task: str) -> dict[str, Any]:
         if not task or not task.strip():
             raise AgentExecutionError("Task cannot be empty.")
@@ -327,7 +333,7 @@ The execution runtime independently validates the real filesystem and generated 
                 verified = self._verified_result(task, actions, records)
                 if verified:
                     return verified
-                partial = self._result_from_records(actions, records, self._verify_evidence(task, records)) if records else None
+                partial = self._partial_result(task, actions, records)
                 if not records:
                     raise AgentExecutionError("Agent stopped without executing any tool action.", partial_result=partial) from exc
                 raise AgentExecutionError("Agent stopped before producing a verified completion.", partial_result=partial) from exc
@@ -364,14 +370,20 @@ The execution runtime independently validates the real filesystem and generated 
                 continue
 
             if decision.get("action") != "tool":
-                raise AgentExecutionError("Invalid agent action.")
+                raise AgentExecutionError("Invalid agent action.", partial_result=self._partial_result(task, actions, records))
 
             tool = str(decision.get("tool", "")).strip().lower()
             args = decision.get("args", {})
             if tool not in self._TOOLS and tool not in self._TERMINAL_ALIASES:
-                raise AgentExecutionError(f"Unknown tool: {tool}")
+                raise AgentExecutionError(
+                    f"Unknown tool: {tool}",
+                    partial_result=self._partial_result(task, actions, records),
+                )
             if not isinstance(args, dict):
-                raise AgentExecutionError("Tool args must be an object.")
+                raise AgentExecutionError(
+                    "Tool args must be an object.",
+                    partial_result=self._partial_result(task, actions, records),
+                )
 
             try:
                 result = self._tool(tool, args)
@@ -392,8 +404,7 @@ The execution runtime independently validates the real filesystem and generated 
         verified = self._verified_result(task, actions, records)
         if verified:
             return verified
-        evidence = self._verify_evidence(task, records)
-        partial = self._result_from_records(actions, records, evidence) if records else None
+        partial = self._partial_result(task, actions, records)
         raise AgentExecutionError(
             f"Agent exceeded maximum execution steps ({self.max_steps}).",
             partial_result=partial,
