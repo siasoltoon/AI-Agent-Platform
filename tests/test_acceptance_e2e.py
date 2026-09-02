@@ -35,8 +35,8 @@ class AcceptanceRouter:
                     "checks": [
                         {"type": "file_exists", "path": "acceptance.txt", "passed": True},
                         {"type": "read_verified_exists", "path": "acceptance.txt", "passed": True},
-                        {"type": "file_content_matches_write", "path": "acceptance.txt", "passed": True},
-                        {"type": "read_content_matches_write", "path": "acceptance.txt", "passed": True},
+                        {"type": "file_content_matches_write", "path": "acceptance.txt", "passed": True, "expected_content": "accepted"},
+                        {"type": "read_content_matches_write", "path": "acceptance.txt", "passed": True, "actual_content": "accepted"},
                     ],
                 },
                 "tool_records": [
