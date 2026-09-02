@@ -26,6 +26,14 @@ class MissionMemory:
 
     VALID_STATUSES = {"pending", "running", "completed", "blocked", "cancelled", "interrupted"}
     TERMINAL_STATUSES = {"completed", "cancelled"}
+    ALLOWED_TRANSITIONS = {
+        "pending": {"running", "cancelled", "interrupted", "blocked"},
+        "running": {"completed", "blocked", "cancelled", "interrupted"},
+        "interrupted": {"running", "cancelled"},
+        "blocked": {"running", "cancelled"},
+        "completed": set(),
+        "cancelled": set(),
+    }
 
     def __post_init__(self) -> None:
         if not self.mission_id.strip() or not self.objective.strip():
@@ -34,11 +42,13 @@ class MissionMemory:
             raise ValueError(f"Invalid mission status: {self.status}")
 
     def transition(self, status: str) -> None:
-        """Apply a durable lifecycle transition without silently reopening terminal missions."""
+        """Apply an explicit lifecycle transition and reject invalid state jumps."""
         if status not in self.VALID_STATUSES:
             raise ValueError(f"Invalid mission status: {status}")
-        if self.status in self.TERMINAL_STATUSES and status != self.status:
-            raise ValueError(f"Terminal mission cannot transition from {self.status} to {status}")
+        if status == self.status:
+            return
+        if status not in self.ALLOWED_TRANSITIONS[self.status]:
+            raise ValueError(f"Invalid mission transition: {self.status} -> {status}")
         self.status = status
 
     def checkpoint(
