@@ -24,13 +24,18 @@ DASHBOARD_DIR = BASE_DIR / "dashboard"
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    runner = TaskRunner(tasks.TASK_STORE, tasks.task_router, poll_seconds=DEFAULT_POLL_SECONDS)
+    runner = TaskRunner(
+        tasks.TASK_STORE,
+        tasks.task_router,
+        poll_seconds=DEFAULT_POLL_SECONDS,
+        shutdown_timeout_seconds=CONFIG.shutdown_timeout_seconds,
+    )
     tasks.TASK_RUNNER = runner
     runner.start()
     try:
         yield
     finally:
-        runner.stop()
+        runner.stop(timeout_seconds=CONFIG.shutdown_timeout_seconds)
         tasks.TASK_RUNNER = None
 
 
