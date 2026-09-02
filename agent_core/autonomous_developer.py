@@ -14,7 +14,7 @@ from agent_core.verification import FailureClass, classify_failure, verify_execu
 
 
 class AutonomousDeveloper:
-    """Run durable, adaptive developer missions over the existing AgentRuntime."""
+    """Run durable, bounded, adaptive developer missions over the existing AgentRuntime."""
 
     MAX_TASKS = 128
 
@@ -79,14 +79,27 @@ class AutonomousDeveloper:
                 return payload.get("code") == 0
         return False
 
-    def _recover(self, graph: TaskGraph, task: GraphTask, error: BaseException | str, memory: MissionMemory) -> None:
+    def _recover(
+        self,
+        graph: TaskGraph,
+        task: GraphTask,
+        error: BaseException | str,
+        memory: MissionMemory,
+    ) -> bool:
+        """Record failure and, when safe, schedule explicit diagnosis/repair work."""
         action = self.planner.recovery_action(error)
         category = classify_failure(error)
         memory.record_failure(task.task_id, f"{category.value}: {error}; action={action}")
         if action in {"diagnose_and_repair", "inspect_tool_and_retry_or_switch_tool"}:
-            for repair_task in self.planner.expand_after_failure(graph, task.task_id, error):
-                if repair_task.task_id not in memory.pending:
-                    memory.pending.append(repair_task.task_id)
+            repairs = self.planner.expand_after_failure(graph, task.task_id, error)
+            if repairs:
+                memory.checkpoint(
+                    step_id=task.task_id,
+                    summary="scheduled bounded diagnosis and repair before retry",
+                    evidence={"repair_tasks": [repair.task_id for repair in repairs]},
+                )
+                return True
+        return False
 
     def run(self, mission_id: str, objective: str, max_retries: int = 3) -> dict[str, Any]:
         if not mission_id.strip() or not objective.strip():
@@ -163,9 +176,14 @@ class AutonomousDeveloper:
                         completed = True
                         break
                     except Exception as exc:
-                        self._recover(graph, task, exc, memory)
+                        repaired = self._recover(graph, task, exc, memory)
                         self.memory_store.save(memory)
                         category = classify_failure(exc)
+                        if repaired and offset == retries:
+                            graph.mark_pending(task.task_id)
+                            memory.pending = [t.task_id for t in graph.tasks.values() if t.status != "completed"]
+                            self.memory_store.save(memory)
+                            break
                         if category is FailureClass.BLOCKING or offset == retries:
                             graph.mark_blocked(task.task_id)
                             memory.pending = [t.task_id for t in graph.tasks.values() if t.status != "completed"]
@@ -178,6 +196,8 @@ class AutonomousDeveloper:
                                 "error": str(exc),
                                 "memory": memory.snapshot(),
                             }
+                if not completed and graph.tasks[task.task_id].status == "pending":
+                    continue
                 if not completed:
                     return {"mission_id": mission_id, "status": "blocked", "task": task.task_id, "memory": memory.snapshot()}
 
