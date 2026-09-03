@@ -15,3 +15,9 @@ export async function createTask(payload) {
     body: JSON.stringify(payload),
   });
 }
+
+export async function resumeTask(taskId) {
+  return apiRequest(`/tasks/${encodeURIComponent(taskId)}/resume`, {
+    method: 'POST',
+  });
+}
