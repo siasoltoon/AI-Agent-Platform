@@ -154,7 +154,6 @@ class Worker:
         if cached is not None:
             logger.info("Returning cached idempotent result for task_id=%s", task_id)
             return cached
-
         if not self._execution_lock.acquire(blocking=False):
             self._release_task_id(task_id)
             raise RuntimeError("Worker is busy executing another task.")
@@ -170,56 +169,40 @@ class Worker:
             prompt = str(prompt).strip()
             if len(prompt) > MAX_PROMPT_CHARS:
                 raise ValueError(f"Task prompt cannot exceed {MAX_PROMPT_CHARS} characters.")
-
             model = str(job.get("model") or DEFAULT_MODEL).strip()
             if not model or len(model) > MAX_MODEL_CHARS:
                 raise ValueError(f"Model identifier must be between 1 and {MAX_MODEL_CHARS} characters.")
-
             timeout = int(job.get("timeout") or WORKER_TIMEOUT)
             if timeout < 1 or timeout > MAX_TIMEOUT_SECONDS:
                 raise ValueError(f"Worker timeout must be between 1 and {MAX_TIMEOUT_SECONDS} seconds.")
-
             metadata = job.get("metadata") or {}
             if not isinstance(metadata, dict) or len(metadata) > MAX_METADATA_KEYS:
                 raise ValueError(f"Task metadata cannot contain more than {MAX_METADATA_KEYS} keys.")
             workspace = metadata.get("workspace")
-
             execution_profile = str(metadata.get("execution_profile", "normal")).strip().lower()
             if execution_profile not in {"normal", "large"}:
                 raise ValueError("execution_profile must be either 'normal' or 'large'.")
             maximum_steps = MAX_LARGE_AGENT_STEPS if execution_profile == "large" else MAX_NORMAL_AGENT_STEPS
             requested_steps = int(metadata.get("max_agent_steps", maximum_steps))
             if requested_steps < 1 or requested_steps > maximum_steps:
-                raise ValueError(
-                    f"max_agent_steps must be between 1 and {maximum_steps} for the {execution_profile} execution profile."
-                )
-
-            logger.info(
-                "Executing task_id=%s model=%s prompt_length=%s timeout=%s mode=agentic-reliable profile=%s max_agent_steps=%s self_repair_attempts=%s",
-                task_id, model, len(prompt), timeout, execution_profile, requested_steps, ReliableAgentExecutor.MAX_ATTEMPTS,
+                raise ValueError(f"max_agent_steps must be between 1 and {maximum_steps} for the {execution_profile} execution profile.")
+            logger.info("Executing task_id=%s model=%s prompt_length=%s timeout=%s mode=agentic-reliable profile=%s max_agent_steps=%s self_repair_attempts=%s", task_id, model, len(prompt), timeout, execution_profile, requested_steps, ReliableAgentExecutor.MAX_ATTEMPTS)
+            service = OllamaService(
+                base_url=OLLAMA_HOST,
+                model=model,
+                timeout=timeout,
+                cancel_event=cancellation_event,
+                use_isolated_cancellation_process=True,
             )
-            service = OllamaService(base_url=OLLAMA_HOST, model=model, timeout=timeout, cancel_event=cancellation_event)
             executor = AgentExecutor(service, workspace_root=workspace, max_steps=requested_steps)
             result = executor.execute(prompt)
-
             if cancellation_event is not None and cancellation_event.is_set():
                 logger.warning("Cancellation detected after executor returned task_id=%s elapsed_ms=%.1f", task_id, (time.monotonic() - execution_started) * 1000)
                 raise AgentExecutionError("Task execution was cancelled.")
             if result.get("status") != "completed" or not result.get("execution_evidence", {}).get("verified", False):
                 raise AgentExecutionError("Agent execution completed without verified execution evidence.")
-
             self.last_completed_at = time.time()
-            response = {
-                "status": "completed",
-                "worker_id": self.worker_id,
-                "task_id": task_id,
-                "model": model,
-                "execution_profile": execution_profile,
-                "max_agent_steps": requested_steps,
-                "result": result,
-                "resource_snapshot": resource_snapshot(),
-                "idempotency": {"key": task_id, "replayed": False},
-            }
+            response = {"status": "completed", "worker_id": self.worker_id, "task_id": task_id, "model": model, "execution_profile": execution_profile, "max_agent_steps": requested_steps, "result": result, "resource_snapshot": resource_snapshot(), "idempotency": {"key": task_id, "replayed": False}}
             self._store_result(task_id, response)
             return response
         except Exception as exc:
@@ -242,24 +225,7 @@ app = FastAPI(title="AI Agent Platform Worker", version="0.7.0")
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    return {
-        "status": "healthy",
-        "worker_id": worker.worker_id,
-        "worker_status": worker.status,
-        "ollama": OLLAMA_HOST,
-        "model": DEFAULT_MODEL,
-        "execution_mode": "agentic-reliable",
-        "max_timeout_seconds": MAX_TIMEOUT_SECONDS,
-        "max_agent_steps": MAX_AGENT_STEPS,
-        "normal_agent_steps": MAX_NORMAL_AGENT_STEPS,
-        "large_agent_steps": MAX_LARGE_AGENT_STEPS,
-        "self_repair_attempts": ReliableAgentExecutor.MAX_ATTEMPTS,
-        "idempotency": {"enabled": True, "scope": "worker-process", "max_entries": MAX_IDEMPOTENCY_ENTRIES},
-        "cancellation": {"enabled": True, "scope": "worker-process", "inflight_only": True},
-        "last_completed_at": worker.last_completed_at,
-        "last_error": worker.last_error,
-        "resources": resource_snapshot(),
-    }
+    return {"status": "healthy", "worker_id": worker.worker_id, "worker_status": worker.status, "ollama": OLLAMA_HOST, "model": DEFAULT_MODEL, "execution_mode": "agentic-reliable", "max_timeout_seconds": MAX_TIMEOUT_SECONDS, "max_agent_steps": MAX_AGENT_STEPS, "normal_agent_steps": MAX_NORMAL_AGENT_STEPS, "large_agent_steps": MAX_LARGE_AGENT_STEPS, "self_repair_attempts": ReliableAgentExecutor.MAX_ATTEMPTS, "idempotency": {"enabled": True, "scope": "worker-process", "max_entries": MAX_IDEMPOTENCY_ENTRIES}, "cancellation": {"enabled": True, "scope": "worker-process", "inflight_only": True}, "last_completed_at": worker.last_completed_at, "last_error": worker.last_error, "resources": resource_snapshot()}
 
 
 @app.post("/execute")
