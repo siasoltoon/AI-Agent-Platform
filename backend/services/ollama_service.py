@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import json
+import threading
 from typing import Any
 
 import requests
 
 
-# Keep the local model request slightly below the controller/worker HTTP
-# deadline. This prevents the controller from timing out while the worker is
-# still holding an active Ollama generation for the same task id.
 OLLAMA_TIMEOUT_MARGIN_SECONDS = 5
 
 
@@ -20,15 +18,60 @@ class OllamaService:
         base_url: str = "http://localhost:11434",
         model: str = "qwen2.5-coder:7b",
         timeout: int = 120,
+        cancel_event: threading.Event | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
+        self.cancel_event = cancel_event
+
+    @property
+    def cancelled(self) -> bool:
+        return bool(self.cancel_event and self.cancel_event.is_set())
 
     @staticmethod
     def _expects_json_action(prompt: str) -> bool:
         lowered = prompt.lower()
         return "return exactly one json object" in lowered or '"action":"tool"' in lowered
+
+    def _raise_if_cancelled(self) -> None:
+        if self.cancelled:
+            raise StopIteration("Ollama generation cancelled.")
+
+    def _generate_once(self, payload: dict[str, Any], request_timeout: int) -> dict[str, Any]:
+        self._raise_if_cancelled()
+        response = None
+        try:
+            # Streaming lets the worker observe cancellation while Ollama is
+            # still generating instead of waiting for a monolithic response.
+            streaming_payload = dict(payload)
+            streaming_payload["stream"] = True
+            response = requests.post(
+                f"{self.base_url}/api/generate",
+                json=streaming_payload,
+                timeout=request_timeout,
+                stream=True,
+            )
+            response.raise_for_status()
+            chunks: list[str] = []
+            final_data: dict[str, Any] = {}
+            for line in response.iter_lines(decode_unicode=True):
+                self._raise_if_cancelled()
+                if not line:
+                    continue
+                item = json.loads(line)
+                if isinstance(item, dict):
+                    final_data = item
+                    piece = item.get("response")
+                    if piece:
+                        chunks.append(str(piece))
+                    if item.get("done") is True:
+                        break
+            final_data["response"] = "".join(chunks)
+            return final_data
+        finally:
+            if response is not None:
+                response.close()
 
     def generate(
         self,
@@ -36,10 +79,11 @@ class OllamaService:
         timeout: int | None = None,
         options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Generate a non-streaming response with a worker-safe runtime limit."""
+        """Generate a response while supporting timeout and cooperative cancellation."""
         if not prompt or not prompt.strip():
             raise ValueError("Prompt cannot be empty.")
 
+        self._raise_if_cancelled()
         agent_json = self._expects_json_action(prompt)
         request_options: dict[str, Any] = {"num_predict": -1}
         if options:
@@ -57,36 +101,22 @@ class OllamaService:
             payload["format"] = "json"
 
         request_timeout = timeout or self.timeout
-        # The controller's timeout must remain the outer boundary. Give the
-        # worker a small margin to receive Ollama's timeout and release its
-        # task-id/in-flight state before the controller can retry anything.
         request_timeout = max(1, request_timeout - OLLAMA_TIMEOUT_MARGIN_SECONDS)
-        response = requests.post(
-            f"{self.base_url}/api/generate",
-            json=payload,
-            timeout=request_timeout,
-        )
-        response.raise_for_status()
-        data = response.json()
+        data = self._generate_once(payload, request_timeout)
 
         if agent_json:
             raw = str(data.get("response", "")).strip()
             try:
                 parsed = json.loads(raw)
             except json.JSONDecodeError:
+                self._raise_if_cancelled()
                 correction = (
                     "Your previous response was not valid JSON. Retry the same action now. "
                     "Return ONLY one valid JSON object, with no markdown, explanation, or code fence.\n\n"
                     f"Original task/context:\n{prompt}"
                 )
                 retry_payload = {**payload, "prompt": correction}
-                retry = requests.post(
-                    f"{self.base_url}/api/generate",
-                    json=retry_payload,
-                    timeout=request_timeout,
-                )
-                retry.raise_for_status()
-                data = retry.json()
+                data = self._generate_once(retry_payload, request_timeout)
                 raw = str(data.get("response", "")).strip()
                 try:
                     parsed = json.loads(raw)
