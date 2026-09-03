@@ -208,3 +208,57 @@ def test_worker_rejects_duplicate_task_id_while_execution_is_in_progress(monkeyp
     release.set()
     thread.join(timeout=2)
     assert errors == []
+
+
+def test_worker_cancellation_stops_execution_and_releases_task_id(monkeypatch):
+    import threading
+
+    started = threading.Event()
+    release = threading.Event()
+    captured = {}
+
+    class FakeService:
+        def __init__(self, **kwargs):
+            captured["cancel_event"] = kwargs.get("cancel_event")
+
+    class FakeExecutor:
+        def __init__(self, service, workspace_root=None, max_steps=None):
+            self.service = service
+
+        def execute(self, prompt):
+            started.set()
+            while not self.service.cancel_event.is_set():
+                release.wait(timeout=0.01)
+            raise RuntimeError("cancelled by test")
+
+    import worker_system.worker as worker_module
+
+    monkeypatch.setattr(worker_module, "OllamaService", FakeService)
+    monkeypatch.setattr(worker_module, "AgentExecutor", FakeExecutor)
+
+    worker = Worker("test-worker")
+    task_id = "mission:cancel:1"
+    errors = []
+
+    def run():
+        try:
+            worker.execute({"task_id": task_id, "prompt": "cancel me", "metadata": {}})
+        except Exception as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    assert started.wait(timeout=1)
+    assert worker.is_cancelled(task_id) is False
+    assert worker.cancel(task_id) is True
+    assert captured["cancel_event"].is_set() is True
+
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert len(errors) == 1
+    assert "cancelled by test" in str(errors[0])
+    assert worker.status == "idle"
+    assert worker.is_cancelled(task_id) is False
+
+    with pytest.raises(RuntimeError, match="already in progress"):
+        worker.execute({"task_id": task_id, "prompt": "second", "metadata": {}})
