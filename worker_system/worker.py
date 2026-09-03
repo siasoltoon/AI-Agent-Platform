@@ -116,24 +116,28 @@ class Worker:
         event = threading.Event()
         with self._cancellation_lock:
             self._cancellation_events[task_id] = event
+        logger.info("[CANCEL] registered task_id=%s", task_id)
         return event
 
     def _release_cancellation(self, task_id: str | None) -> None:
         if task_id:
             with self._cancellation_lock:
                 self._cancellation_events.pop(task_id, None)
+            logger.info("[CANCEL] released task_id=%s", task_id)
 
     def cancel(self, task_id: str) -> bool:
         task_id = str(task_id or "").strip()
+        logger.warning("[CANCEL] received task_id=%s", task_id or "<empty>")
         if not task_id:
+            logger.warning("[CANCEL] rejected empty task_id")
             return False
         with self._cancellation_lock:
             event = self._cancellation_events.get(task_id)
             if event is None:
-                logger.warning("Cancellation requested for task_id=%s but task is not inflight", task_id)
+                logger.warning("[CANCEL] event_found=False task_id=%s status=%s", task_id, self.status)
                 return False
             event.set()
-            logger.warning("Cancellation event set for task_id=%s", task_id)
+            logger.warning("[CANCEL] event_found=True event_set=True task_id=%s", task_id)
             return True
 
     def is_cancelled(self, task_id: str | None) -> bool:
@@ -224,11 +228,12 @@ class Worker:
             logger.warning("Task execution exiting with error task_id=%s error_type=%s elapsed_ms=%.1f", task_id, type(exc).__name__, (time.monotonic() - execution_started) * 1000)
             raise
         finally:
+            logger.info("[CANCEL] execution cleanup begin task_id=%s cancelled=%s", task_id, bool(cancellation_event and cancellation_event.is_set()))
             self._release_cancellation(task_id)
             self.status = "idle"
             self.started_at = None
             self._execution_lock.release()
-            logger.info("Task execution cleanup complete task_id=%s cancelled=%s total_elapsed_ms=%.1f", task_id, bool(cancellation_event and cancellation_event.is_set()), (time.monotonic() - execution_started) * 1000)
+            logger.info("[CANCEL] execution cleanup complete task_id=%s status=%s total_elapsed_ms=%.1f", task_id, self.status, (time.monotonic() - execution_started) * 1000)
 
 
 worker = Worker("pc-worker-01")
@@ -272,7 +277,10 @@ def execute(request: ExecuteRequest) -> dict[str, Any]:
 
 @app.post("/cancel/{task_id}")
 def cancel(task_id: str) -> dict[str, Any]:
-    if worker.cancel(task_id):
-        logger.warning("Cancellation requested for task_id=%s", task_id)
+    logger.warning("[CANCEL] HTTP endpoint entered task_id=%s", task_id)
+    result = worker.cancel(task_id)
+    if result:
+        logger.warning("[CANCEL] HTTP endpoint returning cancellation_requested task_id=%s", task_id)
         return {"status": "cancellation_requested", "task_id": task_id}
+    logger.warning("[CANCEL] HTTP endpoint returning not_inflight task_id=%s", task_id)
     return {"status": "not_inflight", "task_id": task_id}
