@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import threading
 from typing import Any
 
@@ -26,16 +27,61 @@ class OllamaService:
     @staticmethod
     def _expects_json_action(prompt: str) -> bool:
         lowered = prompt.lower()
-        return "return exactly one json object" in lowered or '"action":"tool"' in lowered
+        return "return exactly one json object" in lowered or '\"action\":\"tool\"' in lowered
 
     def _raise_if_cancelled(self) -> None:
         if self.cancelled:
             raise StopIteration("Ollama generation cancelled.")
 
+    @staticmethod
+    def _hard_abort_response(response: Any) -> None:
+        """Best-effort hard abort of the underlying HTTP socket.
+
+        Closing a requests response normally releases client-side resources, but
+        a blocked streaming read can remain alive long enough for Ollama to
+        continue generating. Explicitly shutting down the underlying socket
+        gives the server a prompt disconnect signal as well.
+        """
+        raw = getattr(response, "raw", None)
+        candidates: list[Any] = [
+            getattr(raw, "_connection", None),
+            getattr(raw, "_sock", None),
+        ]
+        fp = getattr(raw, "_fp", None)
+        fp_fp = getattr(fp, "fp", None)
+        fp_raw = getattr(fp_fp, "raw", None)
+        candidates.extend([
+            getattr(fp_raw, "_sock", None),
+            fp_raw,
+        ])
+
+        seen: set[int] = set()
+        for candidate in candidates:
+            if candidate is None or id(candidate) in seen:
+                continue
+            seen.add(id(candidate))
+            sock = getattr(candidate, "sock", candidate)
+            try:
+                shutdown = getattr(sock, "shutdown", None)
+                if callable(shutdown):
+                    shutdown(socket.SHUT_RDWR)
+            except (OSError, AttributeError):
+                pass
+            try:
+                close = getattr(sock, "close", None)
+                if callable(close):
+                    close()
+            except (OSError, AttributeError):
+                pass
+
+        try:
+            response.close()
+        except (OSError, AttributeError):
+            pass
+
     def _generate_once(self, payload: dict[str, Any], request_timeout: int) -> dict[str, Any]:
         self._raise_if_cancelled()
         response = None
-        watcher: threading.Thread | None = None
         try:
             streaming_payload = dict(payload)
             streaming_payload["stream"] = True
@@ -43,15 +89,14 @@ class OllamaService:
             response.raise_for_status()
 
             # A read from iter_lines can block while Ollama is generating. A
-            # small daemon watcher closes the response as soon as cancellation
-            # is requested, causing the blocked read to unwind promptly.
+            # daemon watcher hard-aborts the underlying socket as soon as
+            # cancellation is requested, so Ollama receives a real disconnect.
             if self.cancel_event is not None:
                 def cancel_watcher() -> None:
                     self.cancel_event.wait()
                     if self.cancel_event.is_set() and response is not None:
-                        response.close()
-                watcher = threading.Thread(target=cancel_watcher, name="ollama-cancel-watcher", daemon=True)
-                watcher.start()
+                        self._hard_abort_response(response)
+                threading.Thread(target=cancel_watcher, name="ollama-cancel-watcher", daemon=True).start()
 
             chunks: list[str] = []
             final_data: dict[str, Any] = {}
@@ -72,7 +117,7 @@ class OllamaService:
             return final_data
         finally:
             if response is not None:
-                response.close()
+                self._hard_abort_response(response)
 
     def generate(self, prompt: str, timeout: int | None = None, options: dict[str, Any] | None = None) -> dict[str, Any]:
         """Generate a response while supporting timeout and cooperative cancellation."""
