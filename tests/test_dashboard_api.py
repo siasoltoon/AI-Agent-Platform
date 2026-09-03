@@ -58,5 +58,7 @@ def test_completed_resume_dashboard_script_is_wired_into_served_surface():
     assert '<script src="/dashboard/app.js" defer></script>' in index_html
     assert index_html.index('completed-resume.js') < index_html.index('app.js')
     assert "/tasks/${encodeURIComponent(taskId)}/resume" in resume_js
+    assert 'data-completed-resume=' in resume_js
+    assert 'observer.observe(document.body' in resume_js
     assert 'data-resume-task=' in app_js
     assert '/tasks/${encodeURIComponent(id)}/resume' in app_js
