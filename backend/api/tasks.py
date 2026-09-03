@@ -24,13 +24,7 @@ TASK_RUNNER = None
 
 
 def _execute_agent_task(task: TaskRequest, *, task_id: str) -> dict:
-    return runtime.execute(
-        prompt=task.prompt,
-        model=task.model,
-        task_id=task_id,
-        timeout_seconds=task.timeout_seconds,
-        metadata=task.metadata,
-    )
+    return runtime.execute(prompt=task.prompt, model=task.model, task_id=task_id, timeout_seconds=task.timeout_seconds, metadata=task.metadata)
 
 
 command_registry.register("agent.execute", _execute_agent_task)
@@ -58,25 +52,12 @@ async def _create_task(task: TaskRequest) -> TaskResponse:
         "completed_at": None,
         "result": None,
         "error": None,
-        "metadata": {
-            **task.metadata,
-            "prompt_length": len(task.prompt),
-            "command": command,
-            "timeout_seconds": task.timeout_seconds,
-            "queue_limit": CONFIG.max_queued_tasks,
-        },
+        "metadata": {**task.metadata, "prompt_length": len(task.prompt), "command": command, "timeout_seconds": task.timeout_seconds, "queue_limit": CONFIG.max_queued_tasks},
     }
     try:
         TASK_STORE.create(record, max_queued_tasks=CONFIG.max_queued_tasks)
     except TaskQueueCapacityError as exc:
-        raise HTTPException(
-            status_code=429,
-            detail={
-                "task_id": task_id,
-                "message": "Task queue capacity reached.",
-                "max_queued_tasks": CONFIG.max_queued_tasks,
-            },
-        ) from exc
+        raise HTTPException(status_code=429, detail={"task_id": task_id, "message": "Task queue capacity reached.", "max_queued_tasks": CONFIG.max_queued_tasks}) from exc
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Task persistence is unavailable.") from exc
     return TaskResponse(**record)
@@ -113,6 +94,11 @@ async def cancel_task(task_id: str) -> TaskResponse:
         task = TASK_STORE.cancel(task_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Task not found.") from exc
+
+    # Durable cancellation is authoritative in the controller; propagate the
+    # same task identity to the PC worker so an in-flight Ollama generation
+    # is asked to stop rather than continuing after the task is cancelled.
+    runtime.worker_client.cancel_task(task_id)
     return TaskResponse(**task)
 
 
