@@ -54,11 +54,19 @@ def _ollama_request_process(url: str, payload: dict[str, Any], request_timeout: 
 
 
 class OllamaService:
-    def __init__(self, base_url: str = "http://localhost:11434", model: str = "qwen2.5-coder:7b", timeout: int = 120, cancel_event: threading.Event | None = None):
+    def __init__(
+        self,
+        base_url: str = "http://localhost:11434",
+        model: str = "qwen2.5-coder:7b",
+        timeout: int = 120,
+        cancel_event: threading.Event | None = None,
+        use_isolated_cancellation_process: bool = True,
+    ):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
         self.cancel_event = cancel_event
+        self.use_isolated_cancellation_process = use_isolated_cancellation_process
 
     @property
     def cancelled(self) -> bool:
@@ -113,7 +121,7 @@ class OllamaService:
         streaming_payload = dict(payload)
         streaming_payload["stream"] = True
 
-        if self.cancel_event is not None:
+        if self.cancel_event is not None and self.use_isolated_cancellation_process:
             context = multiprocessing.get_context("spawn")
             result_queue = context.Queue()
             process = context.Process(
