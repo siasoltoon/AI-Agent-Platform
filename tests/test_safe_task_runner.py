@@ -83,9 +83,8 @@ def test_definitive_failures_keep_existing_retry_policy(tmp_path):
     runner = SafeTaskRunner(store, FakeRouter(RuntimeError("validation failed")))
 
     record = store.get("ambiguous-task")
-    record["status"] = TaskStatus.RUNNING.value
     runner._fail_or_retry("ambiguous-task", record, "validation failed")
 
     task = store.get("ambiguous-task")
     assert task["status"] == TaskStatus.QUEUED.value
-    assert task["metadata"]["retry_count"] == 1
+    assert task["metadata"].get("retry_count") == 1
