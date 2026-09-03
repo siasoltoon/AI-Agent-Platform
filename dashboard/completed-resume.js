@@ -5,46 +5,50 @@
     "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"
   }[c]));
 
-  async function loadCompleted() {
-    const response = await fetch("/tasks?status=completed&limit=100", { cache: "no-store" });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    return (await response.json()).tasks || [];
-  }
+  let completedIds = new Set();
+  let loading = false;
 
-  function mount() {
-    const content = document.querySelector("#app .content");
-    if (!content || location.hash.replace(/^#\/?/, "") !== "tasks") return;
-    let panel = document.getElementById("completed-resume-panel");
-    if (!panel) {
-      content.insertAdjacentHTML("afterbegin", `
-        <section class="card" id="completed-resume-panel" style="margin-bottom:16px">
-          <div class="card-head"><h2>Completed Tasks</h2><span>Resume با همان Task ID و Mission Memory</span></div>
-          <div class="card-body" id="completed-resume-body"><div class="empty">در حال دریافت Taskهای completed…</div></div>
-        </section>`);
-      panel = document.getElementById("completed-resume-panel");
-      loadCompleted().then(render).catch((error) => renderError(error));
+  async function loadCompletedIds() {
+    if (loading) return;
+    loading = true;
+    try {
+      const response = await fetch("/tasks?status=completed&limit=100", { cache: "no-store" });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const payload = await response.json();
+      completedIds = new Set((payload.tasks || []).map((task) => String(task.id)));
+    } catch (_) {
+      completedIds = new Set();
+    } finally {
+      loading = false;
+      injectResumeControls();
     }
   }
 
-  function render(tasks) {
-    const body = document.getElementById("completed-resume-body");
-    if (!body) return;
-    if (!tasks.length) {
-      body.innerHTML = `<div class="empty">هیچ Task کاملی برای Resume وجود ندارد.</div>`;
-      return;
-    }
-    body.innerHTML = `<div class="table-wrap"><table><thead><tr><th>Task ID</th><th>Prompt</th><th>Completed</th><th>Action</th></tr></thead><tbody>${tasks.map((task) => `
-      <tr>
-        <td><span class="task-id">${escapeHtml(task.id)}</span></td>
-        <td>${escapeHtml(task.prompt)}</td>
-        <td>${task.completed_at ? escapeHtml(new Date(Number(task.completed_at) * 1000).toLocaleString()) : "—"}</td>
-        <td><button class="secondary-btn" data-completed-resume="${escapeHtml(task.id)}">Resume</button></td>
-      </tr>`).join("")}</tbody></table></div>`;
+  function resumeButton(taskId, compact = false) {
+    return `<button class="secondary-btn" type="button" data-completed-resume="${escapeHtml(taskId)}" style="${compact ? "margin-inline-start:8px" : ""}">Resume</button>`;
   }
 
-  function renderError(error) {
-    const body = document.getElementById("completed-resume-body");
-    if (body) body.innerHTML = `<div class="notice"><strong>خطا در دریافت Taskهای completed</strong>${escapeHtml(error.message)}</div>`;
+  function injectResumeControls() {
+    if (location.hash.replace(/^#\/?/, "") !== "tasks") return;
+
+    document.querySelectorAll("#app tr[data-task]").forEach((row) => {
+      const taskId = row.dataset.task;
+      if (!completedIds.has(String(taskId))) return;
+      const actionCell = row.querySelector("td:last-child");
+      if (!actionCell || actionCell.querySelector("[data-completed-resume]")) return;
+      actionCell.insertAdjacentHTML("beforeend", resumeButton(taskId, true));
+    });
+
+    const modal = document.querySelector("#app #modalBackdrop");
+    const modalTitle = document.querySelector("#app #detailTitle");
+    if (modal && modalTitle) {
+      const match = modalTitle.textContent.match(/Task\s+(.+)$/);
+      const taskId = match?.[1]?.trim();
+      if (taskId && completedIds.has(taskId) && !modal.querySelector("[data-completed-resume]")) {
+        const actions = modal.querySelector(".actions");
+        if (actions) actions.insertAdjacentHTML("afterbegin", resumeButton(taskId));
+      }
+    }
   }
 
   async function resume(taskId, button) {
@@ -62,15 +66,17 @@
         const detail = payload?.detail;
         throw new Error(typeof detail === "string" ? detail : detail?.message || JSON.stringify(detail || payload));
       }
+
       button.textContent = "Queued";
       button.classList.add("success");
+      completedIds.delete(String(taskId));
+
       window.setTimeout(() => {
         const refresh = document.getElementById("refreshBtn");
         if (refresh) refresh.click();
-        const panel = document.getElementById("completed-resume-panel");
-        if (panel) panel.remove();
-        mount();
-      }, 350);
+        const modalClose = document.querySelector("#modalBackdrop [data-action='close-modal']");
+        if (modalClose) modalClose.click();
+      }, 250);
     } catch (error) {
       button.disabled = false;
       button.textContent = original;
@@ -81,15 +87,23 @@
   document.addEventListener("click", (event) => {
     const button = event.target.closest("[data-completed-resume]");
     if (!button) return;
+    event.preventDefault();
+    event.stopPropagation();
     resume(button.dataset.completedResume, button);
+  }, true);
+
+  const observer = new MutationObserver(() => {
+    injectResumeControls();
+  });
+  const app = document.getElementById("app");
+  if (app) observer.observe(app, { childList: true, subtree: true });
+
+  window.addEventListener("hashchange", () => {
+    if (location.hash.replace(/^#\/?/, "") === "tasks") loadCompletedIds();
   });
 
-  const observer = new MutationObserver(() => mount());
-  observer.observe(document.getElementById("app"), { childList: true, subtree: true });
-  window.addEventListener("hashchange", () => {
-    const panel = document.getElementById("completed-resume-panel");
-    if (panel) panel.remove();
-    mount();
-  });
-  mount();
+  loadCompletedIds();
+  window.setInterval(() => {
+    if (location.hash.replace(/^#\/?/, "") === "tasks") loadCompletedIds();
+  }, 5000);
 })();
