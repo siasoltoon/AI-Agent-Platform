@@ -60,7 +60,7 @@ class OllamaService:
         model: str = "qwen2.5-coder:7b",
         timeout: int = 120,
         cancel_event: threading.Event | None = None,
-        use_isolated_cancellation_process: bool = True,
+        use_isolated_cancellation_process: bool = False,
     ):
         self.base_url = base_url.rstrip("/")
         self.model = model
