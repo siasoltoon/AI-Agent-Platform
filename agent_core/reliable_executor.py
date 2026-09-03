@@ -55,7 +55,6 @@ class ReliableAgentExecutor:
 
     @staticmethod
     def _terminal_succeeded(record: dict[str, Any]) -> bool:
-        """Return true only when a terminal command actually exited successfully."""
         if not isinstance(record, dict) or record.get("ok") is not True:
             return False
         payload = record.get("result")
@@ -68,7 +67,6 @@ class ReliableAgentExecutor:
 
     @staticmethod
     def _remove_non_instructional_test_mentions(prompt: str) -> str:
-        """Remove test-like words that occur only as filenames or path fragments."""
         text = re.sub(r"(?i)\b[\w./\\-]*test[\w./\\-]*\.(?:txt|md|rst|log|json|ya?ml|toml|ini|cfg|conf)\b", " ", prompt)
         text = re.sub(r"(?i)\b(?:test|tests)[\w./\\-]*\.(?:py|js|jsx|ts|tsx|sh|bat|ps1)\b", " ", text)
         return text
@@ -83,10 +81,7 @@ class ReliableAgentExecutor:
                 r"|\btests?\s+(?:must|should|need to)\s+(?:pass|run|execute)\b",
                 lower,
             )),
-            "build": bool(re.search(
-                r"\b(?:build|compile|compilation|compiling|npm\s+run\s+build)\b",
-                lower,
-            )),
+            "build": bool(re.search(r"\b(?:build|compile|compilation|compiling|npm\s+run\s+build)\b", lower)),
             "inspect": bool(re.search(r"\b(inspect|review|audit)\b", lower)),
             "verify": bool(re.search(r"\b(verify|verification|validate|validation|check)\b", lower)),
             "documentation": "readme" in lower or "documentation" in lower,
@@ -108,29 +103,17 @@ class ReliableAgentExecutor:
             blockers.append("no_successful_tool_action")
 
         tools = {str(record.get("tool", "")).lower() for record in successful}
-        terminal_records = [
-            record for record in successful
-            if str(record.get("tool", "")).lower() == "terminal"
-            or str(record.get("tool", "")).lower() in {"pytest", "python", "py", "pip", "npm", "node", "ruff", "mypy", "black", "vite"}
-        ]
-        terminal_commands = [cls._command(record).lower() for record in terminal_records]
+        terminal_records = [record for record in successful if str(record.get("tool", "")).lower() == "terminal" or str(record.get("tool", "")).lower() in {"pytest", "python", "py", "pip", "npm", "node", "ruff", "mypy", "black", "vite"}]
 
         if requirements["tests"] and not any(
             cls._terminal_succeeded(record)
-            and (
-                "pytest" in cls._command(record).lower()
-                or (
-                    "test" in cls._command(record).lower()
-                    and any(token in cls._command(record).lower() for token in ("python", "py", "npm", "yarn", "pnpm", "cargo", "go"))
-                )
-            )
+            and ("pytest" in cls._command(record).lower() or ("test" in cls._command(record).lower() and any(token in cls._command(record).lower() for token in ("python", "py", "npm", "yarn", "pnpm", "cargo", "go"))))
             for record in terminal_records
         ):
             blockers.append("requested_tests_not_executed_successfully")
 
         if requirements["build"] and not any(
-            cls._terminal_succeeded(record)
-            and any(token in cls._command(record).lower() for token in ("build", "compile", "py_compile"))
+            cls._terminal_succeeded(record) and any(token in cls._command(record).lower() for token in ("build", "compile", "py_compile"))
             for record in terminal_records
         ):
             blockers.append("requested_build_or_compile_not_executed_successfully")
@@ -146,14 +129,9 @@ class ReliableAgentExecutor:
             evidence = self._evidence(result)
             records = self._records(result)
             recent = records[-12:]
-            summary = json.dumps(
-                {"evidence": evidence, "recent_tool_records": recent},
-                ensure_ascii=False,
-                default=str,
-            )
+            summary = json.dumps({"evidence": evidence, "recent_tool_records": recent}, ensure_ascii=False, default=str)
             if len(summary) > self.max_output_chars:
                 summary = summary[: self.max_output_chars] + "...<truncated>"
-
         return f"""Continue the existing autonomous coding mission. This is recovery attempt {attempt}.
 
 ORIGINAL MISSION:
@@ -190,25 +168,23 @@ The goal of this recovery attempt is to finish the ORIGINAL MISSION, not to expl
         attempt_records: list[dict[str, Any]] = []
 
         for attempt in range(1, self.max_attempts + 1):
+            if getattr(self.ollama, "cancelled", False):
+                last_error = "Agent execution cancelled."
+                attempt_records.append({"attempt": attempt, "accepted": False, "cancelled": True})
+                break
             if monotonic() - started_at >= self.budget.max_runtime_seconds:
                 break
 
             effective_prompt = original if attempt == 1 else self._continuation_prompt(original, attempt, last_error, last_result)
-            executor = AgentExecutor(
-                self.ollama,
-                workspace_root=self.workspace_root,
-                max_steps=self.max_steps,
-                max_output_chars=self.max_output_chars,
-            )
+            executor = AgentExecutor(self.ollama, workspace_root=self.workspace_root, max_steps=self.max_steps, max_output_chars=self.max_output_chars)
             try:
                 result = executor.execute(effective_prompt)
-                result = enrich_execution_evidence(
-                    result,
-                    started_at=started_at,
-                    recovery_attempts=attempt - 1,
-                    retries=attempt - 1,
-                )
+                result = enrich_execution_evidence(result, started_at=started_at, recovery_attempts=attempt - 1, retries=attempt - 1)
                 last_result = result
+                if getattr(self.ollama, "cancelled", False):
+                    last_error = "Agent execution cancelled."
+                    attempt_records.append({"attempt": attempt, "accepted": False, "cancelled": True})
+                    break
                 evidence = self._evidence(result)
                 budget_reason = None
                 if evidence.get("tool_calls", 0) > self.budget.max_tool_calls:
@@ -227,37 +203,25 @@ The goal of this recovery attempt is to finish the ORIGINAL MISSION, not to expl
                 accepted, blockers = self._quality_gate(original, result)
                 attempt_records.append({"attempt": attempt, "accepted": accepted, "blockers": blockers})
                 if accepted:
-                    result["reliability"] = {
-                        "attempts": attempt,
-                        "self_repaired": attempt > 1,
-                        "quality_gate": "passed",
-                        "attempt_history": attempt_records,
-                    }
+                    result["reliability"] = {"attempts": attempt, "self_repaired": attempt > 1, "quality_gate": "passed", "attempt_history": attempt_records}
                     return result
                 last_error = "Completion quality gate rejected the attempt: " + ", ".join(blockers)
             except Exception as exc:
+                if getattr(self.ollama, "cancelled", False):
+                    last_error = "Agent execution cancelled."
+                    attempt_records.append({"attempt": attempt, "accepted": False, "cancelled": True})
+                    break
                 partial = getattr(exc, "partial_result", None)
                 if isinstance(partial, dict):
-                    last_result = enrich_execution_evidence(
-                        partial,
-                        started_at=started_at,
-                        recovery_attempts=attempt - 1,
-                        retries=attempt - 1,
-                    )
+                    last_result = enrich_execution_evidence(partial, started_at=started_at, recovery_attempts=attempt - 1, retries=attempt - 1)
                 last_error = f"{type(exc).__name__}: {exc}"
                 attempt_records.append({"attempt": attempt, "accepted": False, "error": last_error})
 
         evidence = self._evidence(last_result) if isinstance(last_result, dict) else {}
         if isinstance(last_result, dict):
-            last_result["reliability"] = {
-                "attempts": len(attempt_records),
-                "self_repaired": len(attempt_records) > 1,
-                "quality_gate": "blocked",
-                "attempt_history": attempt_records,
-            }
+            last_result["reliability"] = {"attempts": len(attempt_records), "self_repaired": len(attempt_records) > 1, "quality_gate": "blocked", "attempt_history": attempt_records}
             last_result["execution_evidence"] = evidence
         raise AgentExecutionError(
-            f"Agent could not complete the task within execution budgets after {len(attempt_records)} attempts. "
-            f"Last failure: {last_error or 'execution budget exhausted'}",
+            f"Agent could not complete the task within execution budgets after {len(attempt_records)} attempts. Last failure: {last_error or 'execution budget exhausted'}",
             partial_result=last_result,
         )
