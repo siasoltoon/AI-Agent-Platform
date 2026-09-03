@@ -111,7 +111,13 @@
   async function cancelTask(id){try{await api(`/tasks/${encodeURIComponent(id)}/cancel`,{method:"POST"});toast("Task cancellation requested.");state.modal=null;await refreshCore();}catch(error){toast(error.message,"error");}}
   async function resumeTask(id){try{const task=await api(`/tasks/${encodeURIComponent(id)}/resume`,{method:"POST"});state.modal=null;toast(`Task ${task.id} resumed and queued.`);await refreshCore();}catch(error){toast(`Resume failed: ${error.message}`,"error");}}
   async function retryTask(id){try{const task=await api(`/tasks/${encodeURIComponent(id)}/retry`,{method:"POST"});state.modal=null;toast(`Task ${task.id} requeued.`);await refreshCore();}catch(error){toast(`Retry failed: ${error.message}`,"error");}}
-  function render(){document.body.innerHTML=shell();bind();renderToasts();}
+  function render(){
+    const root = document.getElementById("app");
+    if (!root) return;
+    root.innerHTML = shell();
+    bind();
+    renderToasts();
+  }
   function bind(){
     document.querySelectorAll("[data-route]").forEach(b=>b.addEventListener("click",()=>{state.route=b.dataset.route;state.sidebarOpen=false;location.hash="#"+state.route;render();}));
     $("#mobileMenu")?.addEventListener("click",()=>{state.sidebarOpen=!state.sidebarOpen;render();}); $("#refreshBtn")?.addEventListener("click",refreshCore);
