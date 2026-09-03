@@ -57,6 +57,8 @@ def test_completed_resume_dashboard_script_is_wired_into_served_surface():
     assert '<script src="/dashboard/completed-resume.js?v=20260903-resume" defer></script>' in index_html
     assert '<script src="/dashboard/app.js?v=20260903-resume" defer></script>' in index_html
     assert index_html.index('completed-resume.js') < index_html.index('app.js')
+    assert '/tasks?limit=100' in resume_js
+    assert '.filter((task) => String(task.status || "").toLowerCase() === "completed")' in resume_js
     assert "/tasks/${encodeURIComponent(taskId)}/resume" in resume_js
     assert 'data-completed-resume=' in resume_js
     assert 'observer.observe(document.getElementById("app")' in resume_js
