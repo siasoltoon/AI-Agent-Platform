@@ -1,4 +1,6 @@
 import json
+import threading
+import time
 from unittest.mock import Mock, patch
 
 from backend.services.ollama_service import OllamaService
@@ -51,3 +53,33 @@ def test_non_agent_generation_does_not_force_json_mode():
     payload = post.call_args.kwargs["json"]
     assert "format" not in payload
     assert payload["stream"] is True
+
+
+def test_cancellation_hard_aborts_blocked_ollama_stream():
+    cancel_event = threading.Event()
+    service = OllamaService(cancel_event=cancel_event)
+    response = Mock()
+    response.raise_for_status.return_value = None
+    closed = threading.Event()
+
+    def close_response():
+        closed.set()
+
+    response.close.side_effect = close_response
+
+    def iter_lines(**_kwargs):
+        while not closed.wait(0.01):
+            yield None
+
+    response.iter_lines.side_effect = iter_lines
+
+    with patch("backend.services.ollama_service.requests.post", return_value=response):
+        thread = threading.Thread(target=lambda: service._generate_once({"model": "qwen2.5-coder:7b", "prompt": "long"}, 30))
+        thread.start()
+        time.sleep(0.05)
+        cancel_event.set()
+        thread.join(timeout=1)
+
+    assert not thread.is_alive()
+    assert closed.is_set()
+    response.close.assert_called()
