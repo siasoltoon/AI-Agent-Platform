@@ -5,54 +5,36 @@
     "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"
   }[c]));
 
-  let completedIds = new Set();
-  let loading = false;
-
-  async function loadCompletedIds() {
-    if (loading) return;
-    loading = true;
-    try {
-      const response = await fetch("/tasks?limit=100", { cache: "no-store" });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const payload = await response.json();
-      completedIds = new Set(
-        (payload.tasks || [])
-          .filter((task) => String(task.status || "").toLowerCase() === "completed")
-          .map((task) => String(task.id))
-      );
-    } catch (_) {
-      completedIds = new Set();
-    } finally {
-      loading = false;
-      injectResumeControls();
-    }
-  }
-
   function resumeButton(taskId, compact = false) {
     return `<button class="secondary-btn" type="button" data-completed-resume="${escapeHtml(taskId)}" style="${compact ? "margin-inline-start:8px" : ""}">Resume</button>`;
   }
 
-  function injectResumeControls() {
-    if (location.hash.replace(/^#\/?/, "") !== "tasks") return;
+  function isCompleted(value) {
+    return String(value ?? "").trim().toLowerCase() === "completed";
+  }
 
-    document.querySelectorAll("#app td[data-task]").forEach((taskCell) => {
+  function injectResumeControls() {
+    document.querySelectorAll("#app tr").forEach((row) => {
+      const taskCell = row.querySelector("td[data-task]");
+      if (!taskCell) return;
       const taskId = taskCell.dataset.task;
-      if (!completedIds.has(String(taskId))) return;
-      const row = taskCell.closest("tr");
-      const actionCell = row?.querySelector("td:last-child");
-      if (!actionCell || actionCell.querySelector("[data-completed-resume]")) return;
-      actionCell.insertAdjacentHTML("beforeend", resumeButton(taskId, true));
+      if (!taskId || row.querySelector("[data-completed-resume]")) return;
+
+      const statusCell = row.querySelector("td:nth-child(2)");
+      if (!isCompleted(statusCell?.textContent)) return;
+
+      const actionCell = row.querySelector("td:last-child");
+      if (actionCell) actionCell.insertAdjacentHTML("beforeend", resumeButton(taskId, true));
     });
 
     const modal = document.querySelector("#app #modalBackdrop");
-    const modalTitle = document.querySelector("#app #detailTitle");
-    if (modal && modalTitle) {
-      const match = modalTitle.textContent.match(/Task\s+(.+)$/);
-      const taskId = match?.[1]?.trim();
-      if (taskId && completedIds.has(taskId) && !modal.querySelector("[data-completed-resume]")) {
-        const actions = modal.querySelector(".actions");
-        if (actions) actions.insertAdjacentHTML("afterbegin", resumeButton(taskId));
-      }
+    if (!modal || modal.querySelector("[data-completed-resume]")) return;
+    const taskIdMatch = modal.querySelector(".modal-head h3")?.textContent?.match(/Task\s+(.+)$/);
+    const taskId = taskIdMatch?.[1]?.trim();
+    const status = modal.querySelector(".detail label")?.parentElement?.textContent;
+    const actions = modal.querySelector(".actions");
+    if (taskId && isCompleted(status) && actions) {
+      actions.insertAdjacentHTML("afterbegin", resumeButton(taskId));
     }
   }
 
@@ -74,8 +56,6 @@
 
       button.textContent = "Queued";
       button.classList.add("success");
-      completedIds.delete(String(taskId));
-
       window.setTimeout(() => {
         const refresh = document.getElementById("refreshBtn");
         if (refresh) refresh.click();
@@ -97,17 +77,12 @@
     resume(button.dataset.completedResume, button);
   }, true);
 
-  const observer = new MutationObserver(() => {
-    injectResumeControls();
-  });
-  observer.observe(document.getElementById("app"), { childList: true, subtree: true });
+  const app = document.getElementById("app");
+  if (app) {
+    const observer = new MutationObserver(injectResumeControls);
+    observer.observe(app, { childList: true, subtree: true });
+  }
 
-  window.addEventListener("hashchange", () => {
-    if (location.hash.replace(/^#\/?/, "") === "tasks") loadCompletedIds();
-  });
-
-  loadCompletedIds();
-  window.setInterval(() => {
-    if (location.hash.replace(/^#\/?/, "") === "tasks") loadCompletedIds();
-  }, 5000);
+  injectResumeControls();
+  window.setInterval(injectResumeControls, 1000);
 })();
