@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 import uuid
@@ -14,6 +15,8 @@ from config.production_config import CONFIG
 from task_engine.contracts import TaskRequest, TaskResponse, TaskStatus
 from task_engine.registry import CommandRegistry
 from task_engine.router import TaskRouter
+
+logger = logging.getLogger("ai_agent_backend.tasks")
 
 router = APIRouter(prefix="/tasks", tags=["Tasks"])
 runtime = AgentRuntime()
@@ -90,15 +93,17 @@ async def get_task_events(task_id: str) -> dict:
 
 @router.post("/{task_id}/cancel", response_model=TaskResponse)
 async def cancel_task(task_id: str) -> TaskResponse:
+    logger.warning("[CANCEL] backend endpoint entered task_id=%s", task_id)
     try:
         task = TASK_STORE.cancel(task_id)
     except KeyError as exc:
+        logger.warning("[CANCEL] backend task not found task_id=%s", task_id)
         raise HTTPException(status_code=404, detail="Task not found.") from exc
 
-    # Durable cancellation is authoritative in the controller; propagate the
-    # same task identity to the PC worker so an in-flight Ollama generation
-    # is asked to stop rather than continuing after the task is cancelled.
-    runtime.worker_client.cancel_task(task_id)
+    logger.warning("[CANCEL] backend store cancelled task_id=%s status=%s", task_id, task.get("status"))
+    logger.warning("[CANCEL] backend propagating to worker task_id=%s worker_base_url=%s", task_id, runtime.worker_client.base_url)
+    worker_result = runtime.worker_client.cancel_task(task_id)
+    logger.warning("[CANCEL] backend worker propagation finished task_id=%s result=%s", task_id, worker_result)
     return TaskResponse(**task)
 
 
