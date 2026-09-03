@@ -31,10 +31,13 @@
   function injectResumeControls() {
     if (location.hash.replace(/^#\/?/, "") !== "tasks") return;
 
-    document.querySelectorAll("#app tr[data-task]").forEach((row) => {
-      const taskId = row.dataset.task;
+    // The main dashboard renderer stores the task id on the clickable <td>,
+    // not on the <tr>. Support that real DOM contract directly.
+    document.querySelectorAll("#app td[data-task]").forEach((taskCell) => {
+      const taskId = taskCell.dataset.task;
       if (!completedIds.has(String(taskId))) return;
-      const actionCell = row.querySelector("td:last-child");
+      const row = taskCell.closest("tr");
+      const actionCell = row?.querySelector("td:last-child");
       if (!actionCell || actionCell.querySelector("[data-completed-resume]")) return;
       actionCell.insertAdjacentHTML("beforeend", resumeButton(taskId, true));
     });
