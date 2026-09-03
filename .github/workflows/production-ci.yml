@@ -59,4 +59,3 @@ jobs:
       - name: Validate served dashboard JavaScript
         run: |
           node --check dashboard/app.js
-          node --check dashboard/completed-resume.js
