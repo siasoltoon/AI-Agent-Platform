@@ -5,35 +5,35 @@
     "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"
   }[c]));
 
-  function resumeButton(taskId, compact = false) {
-    return `<button class="secondary-btn" type="button" data-completed-resume="${escapeHtml(taskId)}" style="${compact ? "margin-inline-start:8px" : ""}">Resume</button>`;
-  }
+  const isCompleted = (value) => String(value ?? "").trim().toLowerCase() === "completed";
 
-  function isCompleted(value) {
-    return String(value ?? "").trim().toLowerCase() === "completed";
+  function resumeButton(taskId) {
+    return `<button class="secondary-btn completed-resume-btn" type="button" data-completed-resume="${escapeHtml(taskId)}" style="margin-inline-start:8px">Resume</button>`;
   }
 
   function injectResumeControls() {
-    document.querySelectorAll("#app tr").forEach((row) => {
+    const rows = document.querySelectorAll("#app table tbody tr");
+    rows.forEach((row) => {
+      if (row.querySelector("[data-completed-resume], [data-resume-task]")) return;
+
       const taskCell = row.querySelector("td[data-task]");
       if (!taskCell) return;
+
+      const statusText = row.querySelector("td:nth-child(2)")?.textContent || "";
+      if (!isCompleted(statusText)) return;
+
       const taskId = taskCell.dataset.task;
-      if (!taskId || row.querySelector("[data-completed-resume]")) return;
-
-      const statusCell = row.querySelector("td:nth-child(2)");
-      if (!isCompleted(statusCell?.textContent)) return;
-
       const actionCell = row.querySelector("td:last-child");
-      if (actionCell) actionCell.insertAdjacentHTML("beforeend", resumeButton(taskId, true));
+      if (taskId && actionCell) actionCell.insertAdjacentHTML("beforeend", resumeButton(taskId));
     });
 
     const modal = document.querySelector("#app #modalBackdrop");
-    if (!modal || modal.querySelector("[data-completed-resume]")) return;
-    const taskIdMatch = modal.querySelector(".modal-head h3")?.textContent?.match(/Task\s+(.+)$/);
-    const taskId = taskIdMatch?.[1]?.trim();
-    const status = modal.querySelector(".detail label")?.parentElement?.textContent;
+    if (!modal || modal.querySelector("[data-completed-resume], [data-resume-task]")) return;
+
+    const taskId = modal.querySelector(".modal-head h3")?.textContent?.match(/Task\s+(.+)$/)?.[1]?.trim();
+    const statusText = modal.querySelector(".detail")?.textContent || "";
     const actions = modal.querySelector(".actions");
-    if (taskId && isCompleted(status) && actions) {
+    if (taskId && isCompleted(statusText) && actions) {
       actions.insertAdjacentHTML("afterbegin", resumeButton(taskId));
     }
   }
@@ -77,12 +77,9 @@
     resume(button.dataset.completedResume, button);
   }, true);
 
-  const app = document.getElementById("app");
-  if (app) {
-    const observer = new MutationObserver(injectResumeControls);
-    observer.observe(app, { childList: true, subtree: true });
-  }
+  const observer = new MutationObserver(injectResumeControls);
+  observer.observe(document.body, { childList: true, subtree: true });
 
   injectResumeControls();
-  window.setInterval(injectResumeControls, 1000);
+  window.setInterval(injectResumeControls, 500);
 })();
