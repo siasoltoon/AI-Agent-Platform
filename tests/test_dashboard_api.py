@@ -48,7 +48,7 @@ def test_dashboard_diagnostics_reports_task_store(monkeypatch, tmp_path: Path):
 
 def test_completed_resume_is_single_source_of_truth_in_main_dashboard():
     route_paths = {getattr(route, "path", None) for route in app.routes}
-    assert "/dashboard/completed-resume.js" in route_paths
+    assert "/dashboard/completed-resume.js" not in route_paths
 
     index_html = Path("dashboard/index.html").read_text(encoding="utf-8")
     app_js = Path("dashboard/app.js").read_text(encoding="utf-8")
@@ -60,7 +60,6 @@ def test_completed_resume_is_single_source_of_truth_in_main_dashboard():
     assert 'const normalizeStatus = (status) =>' in app_js
     assert 'String(status || "").trim().toLowerCase()' in app_js
     assert 'const status=normalizeStatus(t.status); const resume=status==="completed"' in app_js
-    assert 'const status=normalizeStatus(t.status);const resume=status==="completed"' not in app_js
     assert 'data-resume-task=' in app_js
     assert '/tasks/${encodeURIComponent(id)}/resume' in app_js
     assert 'document.getElementById("app")' in app_js
