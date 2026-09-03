@@ -1,10 +1,4 @@
-"""HTTP client for the AI Agent Platform execution worker.
-
-The client preserves structured worker failures and distinguishes definitive
-request failures from ambiguous execution outcomes. Ambiguous outcomes must
-be reconciled with the worker using the same task id before a caller retries a
-side-effectful task.
-"""
+"""HTTP client for the AI Agent Platform execution worker."""
 
 from __future__ import annotations
 
@@ -45,7 +39,6 @@ class WorkerClient:
     def _raise_for_worker_error(cls, response: requests.Response, task_id: str | None = None) -> None:
         if response.ok:
             return
-
         detail: Any = None
         try:
             payload = response.json()
@@ -65,9 +58,6 @@ class WorkerClient:
         else:
             message = str(detail or response.reason or "Worker request failed")
 
-        # A 4xx response is a definitive application/request outcome. A 5xx
-        # response is ambiguous: the worker may have completed a side effect
-        # before the HTTP response failed. Do not blindly replay the request.
         ambiguous = response.status_code >= 500
         retryable = response.status_code in {408, 429} or 500 <= response.status_code < 600
         raise WorkerExecutionError(
@@ -82,37 +72,36 @@ class WorkerClient:
         try:
             response = requests.get(f"{self.base_url}/health", timeout=10)
         except requests.Timeout as exc:
-            raise WorkerExecutionError(
-                "Worker health request timed out.", retryable=True, ambiguous=False
-            ) from exc
+            raise WorkerExecutionError("Worker health request timed out.", retryable=True, ambiguous=False) from exc
         except requests.RequestException as exc:
-            raise WorkerExecutionError(
-                f"Worker health request failed: {exc}", retryable=True, ambiguous=False
-            ) from exc
+            raise WorkerExecutionError(f"Worker health request failed: {exc}", retryable=True, ambiguous=False) from exc
         self._raise_for_worker_error(response)
         return response.json()
 
-    def execute_task(
-        self,
-        task: dict[str, Any],
-        timeout: int | None = None,
-    ) -> dict[str, Any]:
-        """Execute one worker request without unsafe blind retries.
+    def cancel_task(self, task_id: str, *, timeout: float = 5.0) -> dict[str, Any] | None:
+        """Ask the worker to cooperatively cancel an in-flight task."""
+        task_id = str(task_id or "").strip()
+        if not task_id:
+            return None
+        try:
+            response = requests.post(f"{self.base_url}/cancel/{task_id}", timeout=timeout)
+            self._raise_for_worker_error(response, task_id=task_id)
+            payload = response.json()
+            return payload if isinstance(payload, dict) else None
+        except requests.RequestException:
+            # Cancellation is best-effort. The original execution outcome
+            # remains ambiguous when the worker cannot be reached.
+            return None
 
-        Network timeouts/disconnects and worker 5xx responses are marked
-        ambiguous because the worker may have executed the side effect before
-        the client lost the response. Callers should reconcile using the same
-        task id rather than immediately issuing a new side-effectful request.
-        """
+    def execute_task(self, task: dict[str, Any], timeout: int | None = None) -> dict[str, Any]:
+        """Execute one worker request without unsafe blind retries."""
         effective_timeout = timeout or int(task.get("timeout", 300))
         task_id = self._task_id(task)
         try:
-            response = requests.post(
-                f"{self.base_url}/execute",
-                json=task,
-                timeout=effective_timeout,
-            )
+            response = requests.post(f"{self.base_url}/execute", json=task, timeout=effective_timeout)
         except requests.Timeout as exc:
+            if task_id:
+                self.cancel_task(task_id)
             raise WorkerExecutionError(
                 f"Worker request timed out after {effective_timeout} seconds.",
                 retryable=True,
@@ -120,6 +109,8 @@ class WorkerClient:
                 task_id=task_id,
             ) from exc
         except requests.RequestException as exc:
+            if task_id:
+                self.cancel_task(task_id)
             raise WorkerExecutionError(
                 f"Worker request failed: {exc}",
                 retryable=True,
@@ -131,6 +122,8 @@ class WorkerClient:
         try:
             payload = response.json()
         except ValueError as exc:
+            if task_id:
+                self.cancel_task(task_id)
             raise WorkerExecutionError(
                 "Worker returned a non-JSON response.",
                 retryable=True,
