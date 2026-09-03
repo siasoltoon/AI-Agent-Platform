@@ -46,24 +46,21 @@ def test_dashboard_diagnostics_reports_task_store(monkeypatch, tmp_path: Path):
     assert [check["status"] for check in payload["checks"]] == ["pass", "pass", "pass"]
 
 
-def test_completed_resume_dashboard_script_is_wired_into_served_surface():
+def test_completed_resume_is_single_source_of_truth_in_main_dashboard():
     route_paths = {getattr(route, "path", None) for route in app.routes}
     assert "/dashboard/completed-resume.js" in route_paths
 
     index_html = Path("dashboard/index.html").read_text(encoding="utf-8")
-    resume_js = Path("dashboard/completed-resume.js").read_text(encoding="utf-8")
     app_js = Path("dashboard/app.js").read_text(encoding="utf-8")
+    helper = Path("dashboard/completed-resume.js")
 
-    assert '<script src="/dashboard/completed-resume.js?v=20260903-resume" defer></script>' in index_html
-    assert '<script src="/dashboard/app.js?v=20260903-resume" defer></script>' in index_html
-    assert index_html.index('completed-resume.js') < index_html.index('app.js')
-    assert 'const isCompleted = (value) =>' in resume_js
-    assert 'String(value ?? "").trim().toLowerCase() === "completed"' in resume_js
-    assert 'row.querySelector("td[data-task]")' in resume_js
-    assert 'row.querySelector("td:nth-child(2)")' in resume_js
-    assert 'data-completed-resume=' in resume_js
-    assert "/tasks/${encodeURIComponent(taskId)}/resume" in resume_js
-    assert 'observer.observe(document.body' in resume_js
+    assert not helper.exists()
+    assert '<script src="/dashboard/app.js?v=20260903-resume-v2" defer></script>' in index_html
+    assert "completed-resume.js" not in index_html
+    assert 'const normalizeStatus = (status) =>' in app_js
+    assert 'String(status || "").trim().toLowerCase()' in app_js
+    assert 'const status=normalizeStatus(t.status); const resume=status==="completed"' in app_js
+    assert 'const status=normalizeStatus(t.status);const resume=status==="completed"' not in app_js
     assert 'data-resume-task=' in app_js
     assert '/tasks/${encodeURIComponent(id)}/resume' in app_js
     assert 'document.getElementById("app")' in app_js
