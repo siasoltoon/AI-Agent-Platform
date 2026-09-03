@@ -130,8 +130,10 @@ class Worker:
         with self._cancellation_lock:
             event = self._cancellation_events.get(task_id)
             if event is None:
+                logger.warning("Cancellation requested for task_id=%s but task is not inflight", task_id)
                 return False
             event.set()
+            logger.warning("Cancellation event set for task_id=%s", task_id)
             return True
 
     def is_cancelled(self, task_id: str | None) -> bool:
@@ -143,6 +145,7 @@ class Worker:
 
     def execute(self, job: dict[str, Any]) -> dict[str, Any]:
         task_id = str(job.get("task_id") or "").strip() or None
+        execution_started = time.monotonic()
         cached = self._claim_task_id(task_id)
         if cached is not None:
             logger.info("Returning cached idempotent result for task_id=%s", task_id)
@@ -155,6 +158,7 @@ class Worker:
         self.status = "running"
         self.started_at = time.time()
         self.last_error = None
+        logger.info("Task execution started task_id=%s", task_id)
         try:
             prompt = job.get("prompt") or job.get("task")
             if not prompt or not str(prompt).strip():
@@ -195,6 +199,7 @@ class Worker:
             result = executor.execute(prompt)
 
             if cancellation_event is not None and cancellation_event.is_set():
+                logger.warning("Cancellation detected after executor returned task_id=%s elapsed_ms=%.1f", task_id, (time.monotonic() - execution_started) * 1000)
                 raise AgentExecutionError("Task execution was cancelled.")
             if result.get("status") != "completed" or not result.get("execution_evidence", {}).get("verified", False):
                 raise AgentExecutionError("Agent execution completed without verified execution evidence.")
@@ -216,12 +221,14 @@ class Worker:
         except Exception as exc:
             self.last_error = str(exc)
             self._release_task_id(task_id)
+            logger.warning("Task execution exiting with error task_id=%s error_type=%s elapsed_ms=%.1f", task_id, type(exc).__name__, (time.monotonic() - execution_started) * 1000)
             raise
         finally:
             self._release_cancellation(task_id)
             self.status = "idle"
             self.started_at = None
             self._execution_lock.release()
+            logger.info("Task execution cleanup complete task_id=%s cancelled=%s total_elapsed_ms=%.1f", task_id, bool(cancellation_event and cancellation_event.is_set()), (time.monotonic() - execution_started) * 1000)
 
 
 worker = Worker("pc-worker-01")
