@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import socket
 import threading
+import time
 from typing import Any
 
 import requests
 
 
+logger = logging.getLogger("ai_agent_ollama")
 OLLAMA_TIMEOUT_MARGIN_SECONDS = 5
 
 
@@ -42,6 +45,7 @@ class OllamaService:
         continue generating. Explicitly shutting down the underlying socket
         gives the server a prompt disconnect signal as well.
         """
+        started = time.monotonic()
         raw = getattr(response, "raw", None)
         candidates: list[Any] = [
             getattr(raw, "_connection", None),
@@ -78,15 +82,19 @@ class OllamaService:
             response.close()
         except (OSError, AttributeError):
             pass
+        logger.info("Ollama response hard-abort completed elapsed_ms=%.1f", (time.monotonic() - started) * 1000)
 
     def _generate_once(self, payload: dict[str, Any], request_timeout: int) -> dict[str, Any]:
         self._raise_if_cancelled()
         response = None
+        started = time.monotonic()
         try:
             streaming_payload = dict(payload)
             streaming_payload["stream"] = True
+            logger.info("Ollama request start model=%s timeout=%s", self.model, request_timeout)
             response = requests.post(f"{self.base_url}/api/generate", json=streaming_payload, timeout=request_timeout, stream=True)
             response.raise_for_status()
+            logger.info("Ollama response headers received elapsed_ms=%.1f", (time.monotonic() - started) * 1000)
 
             # A read from iter_lines can block while Ollama is generating. A
             # daemon watcher hard-aborts the underlying socket as soon as
@@ -95,7 +103,9 @@ class OllamaService:
                 def cancel_watcher() -> None:
                     self.cancel_event.wait()
                     if self.cancel_event.is_set() and response is not None:
+                        logger.warning("Ollama cancellation observed elapsed_ms=%.1f; hard-aborting response", (time.monotonic() - started) * 1000)
                         self._hard_abort_response(response)
+                        logger.warning("Ollama cancellation hard-abort finished elapsed_ms=%.1f", (time.monotonic() - started) * 1000)
                 threading.Thread(target=cancel_watcher, name="ollama-cancel-watcher", daemon=True).start()
 
             chunks: list[str] = []
@@ -112,12 +122,14 @@ class OllamaService:
                         chunks.append(str(piece))
                     if item.get("done") is True:
                         break
+            logger.info("Ollama stream loop exited elapsed_ms=%.1f cancelled=%s", (time.monotonic() - started) * 1000, self.cancelled)
             self._raise_if_cancelled()
             final_data["response"] = "".join(chunks)
             return final_data
         finally:
             if response is not None:
                 self._hard_abort_response(response)
+            logger.info("Ollama request finished elapsed_ms=%.1f cancelled=%s", (time.monotonic() - started) * 1000, self.cancelled)
 
     def generate(self, prompt: str, timeout: int | None = None, options: dict[str, Any] | None = None) -> dict[str, Any]:
         """Generate a response while supporting timeout and cooperative cancellation."""
