@@ -29,12 +29,8 @@ MAX_METADATA_KEYS = 64
 MAX_NORMAL_AGENT_STEPS = 32
 MAX_LARGE_AGENT_STEPS = 64
 MAX_IDEMPOTENCY_ENTRIES = 256
-# Published worker ceiling. Normal missions default to 32; large missions may use 64.
 MAX_AGENT_STEPS = MAX_LARGE_AGENT_STEPS
 
-# Compatibility injection point retained for the existing worker contract and
-# tests. It now points to the self-repairing executor, so the default behavior
-# is still the hardened path rather than the old one-shot executor.
 AgentExecutor = ReliableAgentExecutor
 
 
@@ -79,8 +75,10 @@ class Worker:
         self.last_error: str | None = None
         self._execution_lock = threading.Lock()
         self._idempotency_lock = threading.Lock()
+        self._cancellation_lock = threading.Lock()
         self._completed_results: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._inflight_task_ids: set[str] = set()
+        self._cancellation_events: dict[str, threading.Event] = {}
 
     def _claim_task_id(self, task_id: str | None) -> dict[str, Any] | None:
         if not task_id:
@@ -112,6 +110,37 @@ class Worker:
             with self._idempotency_lock:
                 self._inflight_task_ids.discard(task_id)
 
+    def _register_cancellation(self, task_id: str | None) -> threading.Event | None:
+        if not task_id:
+            return None
+        event = threading.Event()
+        with self._cancellation_lock:
+            self._cancellation_events[task_id] = event
+        return event
+
+    def _release_cancellation(self, task_id: str | None) -> None:
+        if task_id:
+            with self._cancellation_lock:
+                self._cancellation_events.pop(task_id, None)
+
+    def cancel(self, task_id: str) -> bool:
+        task_id = str(task_id or "").strip()
+        if not task_id:
+            return False
+        with self._cancellation_lock:
+            event = self._cancellation_events.get(task_id)
+            if event is None:
+                return False
+            event.set()
+            return True
+
+    def is_cancelled(self, task_id: str | None) -> bool:
+        if not task_id:
+            return False
+        with self._cancellation_lock:
+            event = self._cancellation_events.get(task_id)
+            return bool(event and event.is_set())
+
     def execute(self, job: dict[str, Any]) -> dict[str, Any]:
         task_id = str(job.get("task_id") or "").strip() or None
         cached = self._claim_task_id(task_id)
@@ -122,6 +151,7 @@ class Worker:
         if not self._execution_lock.acquire(blocking=False):
             self._release_task_id(task_id)
             raise RuntimeError("Worker is busy executing another task.")
+        cancellation_event = self._register_cancellation(task_id)
         self.status = "running"
         self.started_at = time.time()
         self.last_error = None
@@ -160,14 +190,12 @@ class Worker:
                 "Executing task_id=%s model=%s prompt_length=%s timeout=%s mode=agentic-reliable profile=%s max_agent_steps=%s self_repair_attempts=%s",
                 task_id, model, len(prompt), timeout, execution_profile, requested_steps, ReliableAgentExecutor.MAX_ATTEMPTS,
             )
-            service = OllamaService(base_url=OLLAMA_HOST, model=model, timeout=timeout)
-            executor = AgentExecutor(
-                service,
-                workspace_root=workspace,
-                max_steps=requested_steps,
-            )
+            service = OllamaService(base_url=OLLAMA_HOST, model=model, timeout=timeout, cancel_event=cancellation_event)
+            executor = AgentExecutor(service, workspace_root=workspace, max_steps=requested_steps)
             result = executor.execute(prompt)
 
+            if cancellation_event is not None and cancellation_event.is_set():
+                raise AgentExecutionError("Task execution was cancelled.")
             if result.get("status") != "completed" or not result.get("execution_evidence", {}).get("verified", False):
                 raise AgentExecutionError("Agent execution completed without verified execution evidence.")
 
@@ -190,6 +218,7 @@ class Worker:
             self._release_task_id(task_id)
             raise
         finally:
+            self._release_cancellation(task_id)
             self.status = "idle"
             self.started_at = None
             self._execution_lock.release()
@@ -201,7 +230,6 @@ app = FastAPI(title="AI Agent Platform Worker", version="0.7.0")
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    """Return worker health plus a live host resource snapshot."""
     return {
         "status": "healthy",
         "worker_id": worker.worker_id,
@@ -215,6 +243,7 @@ def health() -> dict[str, Any]:
         "large_agent_steps": MAX_LARGE_AGENT_STEPS,
         "self_repair_attempts": ReliableAgentExecutor.MAX_ATTEMPTS,
         "idempotency": {"enabled": True, "scope": "worker-process", "max_entries": MAX_IDEMPOTENCY_ENTRIES},
+        "cancellation": {"enabled": True, "scope": "worker-process", "inflight_only": True},
         "last_completed_at": worker.last_completed_at,
         "last_error": worker.last_error,
         "resources": resource_snapshot(),
@@ -232,3 +261,11 @@ def execute(request: ExecuteRequest) -> dict[str, Any]:
         worker.status = "idle"
         logger.error("Worker execution failed: %s\n%s", exc, traceback.format_exc())
         raise HTTPException(status_code=500, detail={"message": "Worker execution failed.", "error_type": type(exc).__name__, "error": str(exc), "task_id": request.task_id}) from exc
+
+
+@app.post("/cancel/{task_id}")
+def cancel(task_id: str) -> dict[str, Any]:
+    if worker.cancel(task_id):
+        logger.warning("Cancellation requested for task_id=%s", task_id)
+        return {"status": "cancellation_requested", "task_id": task_id}
+    return {"status": "not_inflight", "task_id": task_id}
