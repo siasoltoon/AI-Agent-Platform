@@ -10,15 +10,7 @@ import requests
 class WorkerExecutionError(RuntimeError):
     """Structured worker failure with retry and execution-ambiguity metadata."""
 
-    def __init__(
-        self,
-        message: str,
-        *,
-        retryable: bool,
-        ambiguous: bool,
-        status_code: int | None = None,
-        task_id: str | None = None,
-    ) -> None:
+    def __init__(self, message: str, *, retryable: bool, ambiguous: bool, status_code: int | None = None, task_id: str | None = None) -> None:
         super().__init__(message)
         self.retryable = retryable
         self.ambiguous = ambiguous
@@ -58,8 +50,15 @@ class WorkerClient:
         else:
             message = str(detail or response.reason or "Worker request failed")
 
-        ambiguous = response.status_code >= 500
-        retryable = response.status_code in {408, 429} or 500 <= response.status_code < 600
+        lower = str(message).lower()
+        execution_timeout = "timed out" in lower or "timeout" in lower
+        execution_cancelled = "cancelled" in lower or "canceled" in lower
+        ambiguous = response.status_code >= 500 or execution_timeout or execution_cancelled
+        retryable = response.status_code in {408, 429} or 500 <= response.status_code < 600 or execution_timeout or execution_cancelled
+        if execution_timeout:
+            message = f"Worker request timed out: {message}"
+        elif execution_cancelled:
+            message = f"Worker request cancelled: {message}"
         raise WorkerExecutionError(
             f"Worker HTTP {response.status_code}: {message}",
             retryable=retryable,
@@ -89,8 +88,6 @@ class WorkerClient:
             payload = response.json()
             return payload if isinstance(payload, dict) else None
         except requests.RequestException:
-            # Cancellation is best-effort. The original execution outcome
-            # remains ambiguous when the worker cannot be reached.
             return None
 
     def execute_task(self, task: dict[str, Any], timeout: int | None = None) -> dict[str, Any]:
@@ -103,19 +100,13 @@ class WorkerClient:
             if task_id:
                 self.cancel_task(task_id)
             raise WorkerExecutionError(
-                f"Worker request timed out after {effective_timeout} seconds.",
-                retryable=True,
-                ambiguous=True,
-                task_id=task_id,
+                f"Worker request timed out after {effective_timeout} seconds.", retryable=True, ambiguous=True, task_id=task_id
             ) from exc
         except requests.RequestException as exc:
             if task_id:
                 self.cancel_task(task_id)
             raise WorkerExecutionError(
-                f"Worker request failed: {exc}",
-                retryable=True,
-                ambiguous=True,
-                task_id=task_id,
+                f"Worker request failed: {exc}", retryable=True, ambiguous=True, task_id=task_id
             ) from exc
 
         self._raise_for_worker_error(response, task_id=task_id)
@@ -125,18 +116,10 @@ class WorkerClient:
             if task_id:
                 self.cancel_task(task_id)
             raise WorkerExecutionError(
-                "Worker returned a non-JSON response.",
-                retryable=True,
-                ambiguous=True,
-                status_code=response.status_code,
-                task_id=task_id,
+                "Worker returned a non-JSON response.", retryable=True, ambiguous=True, status_code=response.status_code, task_id=task_id
             ) from exc
         if not isinstance(payload, dict):
             raise WorkerExecutionError(
-                "Worker returned an invalid JSON response object.",
-                retryable=True,
-                ambiguous=True,
-                status_code=response.status_code,
-                task_id=task_id,
+                "Worker returned an invalid JSON response object.", retryable=True, ambiguous=True, status_code=response.status_code, task_id=task_id
             )
         return payload
