@@ -15,7 +15,8 @@ from backend.api import agents
 from backend.api import dashboard
 from backend.api import tasks
 from backend.api import workers
-from backend.task_runner import DEFAULT_POLL_SECONDS, TaskRunner
+from backend.safe_task_runner import SafeTaskRunner
+from backend.task_runner import DEFAULT_POLL_SECONDS
 from config.production_config import CONFIG
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -24,7 +25,7 @@ DASHBOARD_DIR = BASE_DIR / "dashboard"
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    runner = TaskRunner(
+    runner = SafeTaskRunner(
         tasks.TASK_STORE,
         tasks.task_router,
         poll_seconds=DEFAULT_POLL_SECONDS,
@@ -103,6 +104,7 @@ async def readiness() -> dict:
         "status": "ready" if ready else "not_ready",
         "service": app.title,
         "version": app.version,
+        "environment": CONFIG.environment,
         "checks": checks,
     }
 
