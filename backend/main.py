@@ -112,7 +112,7 @@ async def dashboard_page():
     index_file = DASHBOARD_DIR / "index.html"
     if not index_file.exists():
         return {"status": "error", "message": "Dashboard index.html not found."}
-    return FileResponse(index_file)
+    return FileResponse(index_file, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/dashboard/style.css", include_in_schema=False)
@@ -128,7 +128,23 @@ async def dashboard_js():
     js_file = DASHBOARD_DIR / "app.js"
     if not js_file.exists():
         return {"status": "error", "message": "Dashboard app.js not found."}
-    return FileResponse(js_file, media_type="application/javascript")
+    return FileResponse(
+        js_file,
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/dashboard/completed-resume.js", include_in_schema=False)
+async def dashboard_completed_resume_js():
+    js_file = DASHBOARD_DIR / "completed-resume.js"
+    if not js_file.exists():
+        return {"status": "error", "message": "Dashboard completed-resume.js not found."}
+    return FileResponse(
+        js_file,
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/tasks/", include_in_schema=False)
