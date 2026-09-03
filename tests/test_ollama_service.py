@@ -83,3 +83,17 @@ def test_cancellation_hard_aborts_blocked_ollama_stream():
     assert not thread.is_alive()
     assert closed.is_set()
     response.close.assert_called()
+
+
+def test_completed_ollama_request_does_not_leave_a_stale_cancel_watcher():
+    cancel_event = threading.Event()
+    service = OllamaService(cancel_event=cancel_event)
+    response = _response({"response": "completed"})
+
+    with patch("backend.services.ollama_service.requests.post", return_value=response), patch.object(service, "_hard_abort_response") as hard_abort:
+        result = service._generate_once({"model": "qwen2.5-coder:7b", "prompt": "short"}, 30)
+        cancel_event.set()
+        time.sleep(0.15)
+
+    assert result["response"] == "completed"
+    assert hard_abort.call_count == 1
