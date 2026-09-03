@@ -12,10 +12,14 @@
     if (loading) return;
     loading = true;
     try {
-      const response = await fetch("/tasks?status=completed&limit=100", { cache: "no-store" });
+      const response = await fetch("/tasks?limit=100", { cache: "no-store" });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const payload = await response.json();
-      completedIds = new Set((payload.tasks || []).map((task) => String(task.id)));
+      completedIds = new Set(
+        (payload.tasks || [])
+          .filter((task) => String(task.status || "").toLowerCase() === "completed")
+          .map((task) => String(task.id))
+      );
     } catch (_) {
       completedIds = new Set();
     } finally {
