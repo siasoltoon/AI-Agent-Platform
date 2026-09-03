@@ -64,34 +64,49 @@ class OllamaService:
                 shutdown = getattr(sock, "shutdown", None)
                 if callable(shutdown):
                     shutdown(socket.SHUT_RDWR)
-            except (OSError, AttributeError):
+            except (OSError, AttributeError, ValueError):
                 pass
             try:
                 close = getattr(sock, "close", None)
                 if callable(close):
                     close()
-            except (OSError, AttributeError):
+            except (OSError, AttributeError, ValueError):
                 pass
 
         try:
             response.close()
-        except (OSError, AttributeError):
+        except (OSError, AttributeError, ValueError):
             pass
         logger.info("Ollama response hard-abort completed elapsed_ms=%.1f", (time.monotonic() - started) * 1000)
 
     def _generate_once(self, payload: dict[str, Any], request_timeout: int) -> dict[str, Any]:
         self._raise_if_cancelled()
         response = None
+        response_lock = threading.Lock()
+        abort_lock = threading.Lock()
+        aborted = False
         watcher_stop = threading.Event()
         started = time.monotonic()
+
+        def abort_once() -> None:
+            nonlocal aborted
+            with abort_lock:
+                if aborted:
+                    return
+                aborted = True
+            with response_lock:
+                current_response = response
+            if current_response is not None:
+                self._hard_abort_response(current_response)
+                logger.warning("Ollama cancellation hard-abort finished elapsed_ms=%.1f", (time.monotonic() - started) * 1000)
 
         def cancel_watcher() -> None:
             while not watcher_stop.wait(0.05):
                 if self.cancelled:
-                    logger.warning("Ollama cancellation observed during request setup elapsed_ms=%.1f response_ready=%s", (time.monotonic() - started) * 1000, response is not None)
-                    if response is not None:
-                        self._hard_abort_response(response)
-                        logger.warning("Ollama cancellation hard-abort finished elapsed_ms=%.1f", (time.monotonic() - started) * 1000)
+                    with response_lock:
+                        response_ready = response is not None
+                    logger.warning("Ollama cancellation observed during request setup elapsed_ms=%.1f response_ready=%s", (time.monotonic() - started) * 1000, response_ready)
+                    abort_once()
                     return
 
         watcher = threading.Thread(target=cancel_watcher, name="ollama-cancel-watcher", daemon=True)
@@ -100,12 +115,14 @@ class OllamaService:
             streaming_payload = dict(payload)
             streaming_payload["stream"] = True
             logger.info("Ollama request start model=%s timeout=%s connect_timeout=%s", self.model, request_timeout, OLLAMA_CONNECT_TIMEOUT_SECONDS)
-            response = requests.post(
+            current_response = requests.post(
                 f"{self.base_url}/api/generate",
                 json=streaming_payload,
                 timeout=(OLLAMA_CONNECT_TIMEOUT_SECONDS, request_timeout),
                 stream=True,
             )
+            with response_lock:
+                response = current_response
             response.raise_for_status()
             logger.info("Ollama response headers received elapsed_ms=%.1f cancelled=%s", (time.monotonic() - started) * 1000, self.cancelled)
             self._raise_if_cancelled()
@@ -130,8 +147,11 @@ class OllamaService:
             return final_data
         finally:
             watcher_stop.set()
-            if response is not None:
+            if self.cancelled:
+                abort_once()
+            elif response is not None:
                 self._hard_abort_response(response)
+            watcher.join(timeout=0.5)
             logger.info("Ollama request finished elapsed_ms=%.1f cancelled=%s", (time.monotonic() - started) * 1000, self.cancelled)
 
     def generate(self, prompt: str, timeout: int | None = None, options: dict[str, Any] | None = None) -> dict[str, Any]:
