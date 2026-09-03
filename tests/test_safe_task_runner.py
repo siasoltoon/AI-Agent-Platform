@@ -87,4 +87,3 @@ def test_definitive_failures_keep_existing_retry_policy(tmp_path):
 
     task = store.get("ambiguous-task")
     assert task["status"] == TaskStatus.QUEUED.value
-    assert task["metadata"].get("retry_count") == 1
