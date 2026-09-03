@@ -14,6 +14,7 @@ import requests
 
 logger = logging.getLogger("ai_agent_ollama")
 OLLAMA_TIMEOUT_MARGIN_SECONDS = 5
+OLLAMA_CONNECT_TIMEOUT_SECONDS = 3
 
 
 class OllamaService:
@@ -38,13 +39,7 @@ class OllamaService:
 
     @staticmethod
     def _hard_abort_response(response: Any) -> None:
-        """Best-effort hard abort of the underlying HTTP socket.
-
-        Closing a requests response normally releases client-side resources, but
-        a blocked streaming read can remain alive long enough for Ollama to
-        continue generating. Explicitly shutting down the underlying socket
-        gives the server a prompt disconnect signal as well.
-        """
+        """Best-effort hard abort of the underlying HTTP socket."""
         started = time.monotonic()
         raw = getattr(response, "raw", None)
         candidates: list[Any] = [
@@ -89,26 +84,31 @@ class OllamaService:
         response = None
         watcher_stop = threading.Event()
         started = time.monotonic()
+
+        def cancel_watcher() -> None:
+            while not watcher_stop.wait(0.05):
+                if self.cancelled:
+                    logger.warning("Ollama cancellation observed during request setup elapsed_ms=%.1f response_ready=%s", (time.monotonic() - started) * 1000, response is not None)
+                    if response is not None:
+                        self._hard_abort_response(response)
+                        logger.warning("Ollama cancellation hard-abort finished elapsed_ms=%.1f", (time.monotonic() - started) * 1000)
+                    return
+
+        watcher = threading.Thread(target=cancel_watcher, name="ollama-cancel-watcher", daemon=True)
+        watcher.start()
         try:
             streaming_payload = dict(payload)
             streaming_payload["stream"] = True
-            logger.info("Ollama request start model=%s timeout=%s", self.model, request_timeout)
-            response = requests.post(f"{self.base_url}/api/generate", json=streaming_payload, timeout=request_timeout, stream=True)
+            logger.info("Ollama request start model=%s timeout=%s connect_timeout=%s", self.model, request_timeout, OLLAMA_CONNECT_TIMEOUT_SECONDS)
+            response = requests.post(
+                f"{self.base_url}/api/generate",
+                json=streaming_payload,
+                timeout=(OLLAMA_CONNECT_TIMEOUT_SECONDS, request_timeout),
+                stream=True,
+            )
             response.raise_for_status()
-            logger.info("Ollama response headers received elapsed_ms=%.1f", (time.monotonic() - started) * 1000)
-
-            # A read from iter_lines can block while Ollama is generating. The
-            # watcher is scoped to this request and exits when that request
-            # finishes, preventing stale watchers from firing on later cancels.
-            if self.cancel_event is not None:
-                def cancel_watcher() -> None:
-                    while not watcher_stop.wait(0.05):
-                        if self.cancel_event.is_set() and response is not None:
-                            logger.warning("Ollama cancellation observed elapsed_ms=%.1f; hard-aborting response", (time.monotonic() - started) * 1000)
-                            self._hard_abort_response(response)
-                            logger.warning("Ollama cancellation hard-abort finished elapsed_ms=%.1f", (time.monotonic() - started) * 1000)
-                            return
-                threading.Thread(target=cancel_watcher, name="ollama-cancel-watcher", daemon=True).start()
+            logger.info("Ollama response headers received elapsed_ms=%.1f cancelled=%s", (time.monotonic() - started) * 1000, self.cancelled)
+            self._raise_if_cancelled()
 
             chunks: list[str] = []
             final_data: dict[str, Any] = {}
