@@ -214,22 +214,29 @@ def test_worker_cancellation_stops_execution_and_releases_task_id(monkeypatch):
     import threading
 
     started = threading.Event()
-    release = threading.Event()
     captured = {}
+    calls = []
 
     class FakeService:
         def __init__(self, **kwargs):
             captured["cancel_event"] = kwargs.get("cancel_event")
+            self.cancel_event = kwargs.get("cancel_event")
 
     class FakeExecutor:
         def __init__(self, service, workspace_root=None, max_steps=None):
             self.service = service
 
         def execute(self, prompt):
-            started.set()
-            while not self.service.cancel_event.is_set():
-                release.wait(timeout=0.01)
-            raise RuntimeError("cancelled by test")
+            calls.append(prompt)
+            if len(calls) == 1:
+                started.set()
+                while not self.service.cancel_event.is_set():
+                    self.service.cancel_event.wait(timeout=0.01)
+                raise RuntimeError("cancelled by test")
+            return {
+                "status": "completed",
+                "execution_evidence": {"verified": True},
+            }
 
     import worker_system.worker as worker_module
 
@@ -260,5 +267,6 @@ def test_worker_cancellation_stops_execution_and_releases_task_id(monkeypatch):
     assert worker.status == "idle"
     assert worker.is_cancelled(task_id) is False
 
-    with pytest.raises(RuntimeError, match="already in progress"):
-        worker.execute({"task_id": task_id, "prompt": "second", "metadata": {}})
+    second = worker.execute({"task_id": task_id, "prompt": "second", "metadata": {}})
+    assert second["status"] == "completed"
+    assert calls == ["cancel me", "second"]
