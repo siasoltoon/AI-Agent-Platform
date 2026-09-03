@@ -31,8 +31,6 @@
   function injectResumeControls() {
     if (location.hash.replace(/^#\/?/, "") !== "tasks") return;
 
-    // app.js replaces the contents of #app during every render. Observe the
-    // stable document body so this controller survives those replacements.
     document.querySelectorAll("#app td[data-task]").forEach((taskCell) => {
       const taskId = taskCell.dataset.task;
       if (!completedIds.has(String(taskId))) return;
@@ -98,10 +96,7 @@
   const observer = new MutationObserver(() => {
     injectResumeControls();
   });
-  // app.js replaces #app itself, so #app is not a durable observation root.
-  // document.body remains stable and lets the helper re-inject controls after
-  // every dashboard render without replacing or reconstructing app.js.
-  observer.observe(document.body, { childList: true, subtree: true });
+  observer.observe(document.getElementById("app"), { childList: true, subtree: true });
 
   window.addEventListener("hashchange", () => {
     if (location.hash.replace(/^#\/?/, "") === "tasks") loadCompletedIds();
