@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import requests
+
+logger = logging.getLogger("ai_agent_backend.worker_client")
 
 
 class WorkerExecutionError(RuntimeError):
@@ -80,14 +83,19 @@ class WorkerClient:
     def cancel_task(self, task_id: str, *, timeout: float = 5.0) -> dict[str, Any] | None:
         """Ask the worker to cooperatively cancel an in-flight task."""
         task_id = str(task_id or "").strip()
+        logger.warning("[CANCEL->WORKER] begin task_id=%s url=%s/cancel/%s timeout=%s", task_id or "<empty>", self.base_url, task_id or "<empty>", timeout)
         if not task_id:
+            logger.warning("[CANCEL->WORKER] rejected empty task_id")
             return None
         try:
             response = requests.post(f"{self.base_url}/cancel/{task_id}", timeout=timeout)
+            logger.warning("[CANCEL->WORKER] response task_id=%s status=%s body=%s", task_id, response.status_code, response.text[:500])
             self._raise_for_worker_error(response, task_id=task_id)
             payload = response.json()
+            logger.warning("[CANCEL->WORKER] success task_id=%s payload=%s", task_id, payload)
             return payload if isinstance(payload, dict) else None
-        except requests.RequestException:
+        except requests.RequestException as exc:
+            logger.error("[CANCEL->WORKER] request_exception task_id=%s error_type=%s error=%s", task_id, type(exc).__name__, exc)
             return None
 
     def execute_task(self, task: dict[str, Any], timeout: int | None = None) -> dict[str, Any]:
