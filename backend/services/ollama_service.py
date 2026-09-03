@@ -8,6 +8,12 @@ from typing import Any
 import requests
 
 
+# Keep the local model request slightly below the controller/worker HTTP
+# deadline. This prevents the controller from timing out while the worker is
+# still holding an active Ollama generation for the same task id.
+OLLAMA_TIMEOUT_MARGIN_SECONDS = 5
+
+
 class OllamaService:
     def __init__(
         self,
@@ -30,7 +36,7 @@ class OllamaService:
         timeout: int | None = None,
         options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Generate a non-streaming response with configurable runtime limits."""
+        """Generate a non-streaming response with a worker-safe runtime limit."""
         if not prompt or not prompt.strip():
             raise ValueError("Prompt cannot be empty.")
 
@@ -51,6 +57,10 @@ class OllamaService:
             payload["format"] = "json"
 
         request_timeout = timeout or self.timeout
+        # The controller's timeout must remain the outer boundary. Give the
+        # worker a small margin to receive Ollama's timeout and release its
+        # task-id/in-flight state before the controller can retry anything.
+        request_timeout = max(1, request_timeout - OLLAMA_TIMEOUT_MARGIN_SECONDS)
         response = requests.post(
             f"{self.base_url}/api/generate",
             json=payload,
