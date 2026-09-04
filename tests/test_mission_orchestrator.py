@@ -1,9 +1,17 @@
+from agent_core.mission_memory import MissionMemoryStore
 from agent_core.mission_orchestrator import MissionOrchestrator, MissionPhase
+
+
+class FakeRuntime:
+    def execute(self, prompt, *, task_id=None, **kwargs):
+        return {"status": "completed"}
 
 
 class FakeDeveloper:
     def __init__(self):
         self.calls = []
+        self.runtime = FakeRuntime()
+        self.memory_store = MissionMemoryStore()
 
     def run(self, mission_id, objective, max_retries=3):
         self.calls.append(("run", mission_id, objective, max_retries))
