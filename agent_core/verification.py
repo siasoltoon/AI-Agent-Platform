@@ -46,12 +46,36 @@ def classify_failure(error: BaseException | str) -> FailureClass:
 
 
 def verify_execution(result: dict[str, Any]) -> VerificationResult:
-    evidence = result.get("execution_evidence") if isinstance(result, dict) else None
-    records = result.get("tool_records") if isinstance(result, dict) else None
+    """Verify completion from independent execution records, not model claims alone."""
+    valid_result = isinstance(result, dict)
+    evidence = result.get("execution_evidence") if valid_result else None
+    records = result.get("tool_records") if valid_result else None
+    valid_records = isinstance(records, list)
+    record_items = records if valid_records else []
+    successful = [item for item in record_items if isinstance(item, dict) and item.get("ok") is True]
+
     checks = {
-        "completed": isinstance(result, dict) and result.get("status") == "completed",
+        "completed": valid_result and result.get("status") == "completed",
         "evidence_verified": isinstance(evidence, dict) and evidence.get("verified") is True,
-        "successful_tool": isinstance(records, list) and any(isinstance(item, dict) and item.get("ok") is True for item in records),
+        "successful_tool": bool(valid_records and successful),
+        "evidence_tool_count_matches": (
+            isinstance(evidence, dict)
+            and evidence.get("tool_calls") == len(record_items)
+            if isinstance(evidence, dict) and "tool_calls" in evidence
+            else valid_records
+        ),
+        "evidence_success_count_matches": (
+            isinstance(evidence, dict)
+            and evidence.get("successful_tool_calls") == len(successful)
+            if isinstance(evidence, dict) and "successful_tool_calls" in evidence
+            else valid_records
+        ),
+        "policy_compliant": (
+            isinstance(evidence, dict)
+            and evidence.get("policy", {}).get("compliant") is not False
+            if isinstance(evidence, dict) and isinstance(evidence.get("policy", {}), dict)
+            else True
+        ),
     }
     blockers = [name for name, passed in checks.items() if not passed]
     return VerificationResult(verified=not blockers, checks=checks, blockers=blockers)
