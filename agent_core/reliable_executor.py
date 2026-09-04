@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from time import monotonic
 from typing import Any
@@ -10,6 +11,8 @@ from typing import Any
 from agent_core.execution_agent import AgentExecutionError, AgentExecutor
 from agent_core.execution_evidence import ExecutionBudget, enrich_execution_evidence
 from backend.services.ollama_service import OllamaService
+
+logger = logging.getLogger("ai_agent_reliable_executor")
 
 
 class ReliableAgentExecutor:
@@ -172,11 +175,20 @@ The goal of this recovery attempt is to finish the ORIGINAL MISSION, not to expl
                 last_error = "Agent execution cancelled."
                 attempt_records.append({"attempt": attempt, "accepted": False, "cancelled": True})
                 break
-            if monotonic() - started_at >= self.budget.max_runtime_seconds:
+            elapsed_before_attempt = monotonic() - started_at
+            if elapsed_before_attempt >= self.budget.max_runtime_seconds:
                 break
 
             effective_prompt = original if attempt == 1 else self._continuation_prompt(original, attempt, last_error, last_result)
             executor = AgentExecutor(self.ollama, workspace_root=self.workspace_root, max_steps=self.max_steps, max_output_chars=self.max_output_chars)
+            attempt_started_at = monotonic()
+            logger.info(
+                "Reliable agent attempt started attempt=%s max_attempts=%s elapsed_seconds=%.3f remaining_budget_seconds=%.3f",
+                attempt,
+                self.max_attempts,
+                elapsed_before_attempt,
+                max(0.0, self.budget.max_runtime_seconds - elapsed_before_attempt),
+            )
             try:
                 result = executor.execute(effective_prompt)
                 result = enrich_execution_evidence(result, started_at=started_at, recovery_attempts=attempt - 1, retries=attempt - 1)
@@ -198,24 +210,66 @@ The goal of this recovery attempt is to finish the ORIGINAL MISSION, not to expl
                     result["execution_evidence"]["budget_exceeded"] = budget_reason
                     last_error = f"Execution budget exceeded: {budget_reason}"
                     attempt_records.append({"attempt": attempt, "accepted": False, "blocker": budget_reason})
+                    logger.warning(
+                        "Reliable agent attempt blocked attempt=%s reason=%s attempt_elapsed_seconds=%.3f total_elapsed_seconds=%.3f",
+                        attempt,
+                        budget_reason,
+                        monotonic() - attempt_started_at,
+                        monotonic() - started_at,
+                    )
                     break
 
                 accepted, blockers = self._quality_gate(original, result)
                 attempt_records.append({"attempt": attempt, "accepted": accepted, "blockers": blockers})
                 if accepted:
+                    logger.info(
+                        "Reliable agent attempt accepted attempt=%s attempt_elapsed_seconds=%.3f total_elapsed_seconds=%.3f",
+                        attempt,
+                        monotonic() - attempt_started_at,
+                        monotonic() - started_at,
+                    )
                     result["reliability"] = {"attempts": attempt, "self_repaired": attempt > 1, "quality_gate": "passed", "attempt_history": attempt_records}
                     return result
                 last_error = "Completion quality gate rejected the attempt: " + ", ".join(blockers)
+                logger.warning(
+                    "Reliable agent quality gate rejected attempt=%s blockers=%s attempt_elapsed_seconds=%.3f total_elapsed_seconds=%.3f",
+                    attempt,
+                    blockers,
+                    monotonic() - attempt_started_at,
+                    monotonic() - started_at,
+                )
             except Exception as exc:
                 if getattr(self.ollama, "cancelled", False):
                     last_error = "Agent execution cancelled."
                     attempt_records.append({"attempt": attempt, "accepted": False, "cancelled": True})
+                    logger.warning(
+                        "Reliable agent attempt cancelled attempt=%s attempt_elapsed_seconds=%.3f total_elapsed_seconds=%.3f",
+                        attempt,
+                        monotonic() - attempt_started_at,
+                        monotonic() - started_at,
+                    )
                     break
                 partial = getattr(exc, "partial_result", None)
                 if isinstance(partial, dict):
                     last_result = enrich_execution_evidence(partial, started_at=started_at, recovery_attempts=attempt - 1, retries=attempt - 1)
                 last_error = f"{type(exc).__name__}: {exc}"
                 attempt_records.append({"attempt": attempt, "accepted": False, "error": last_error})
+                logger.warning(
+                    "Reliable agent attempt failed attempt=%s error_type=%s has_partial_result=%s attempt_elapsed_seconds=%.3f total_elapsed_seconds=%.3f error=%s",
+                    attempt,
+                    type(exc).__name__,
+                    isinstance(partial, dict),
+                    monotonic() - attempt_started_at,
+                    monotonic() - started_at,
+                    exc,
+                )
+                if not isinstance(partial, dict):
+                    logger.warning(
+                        "Reliable agent recovery suppressed after zero-progress failure attempt=%s error_type=%s",
+                        attempt,
+                        type(exc).__name__,
+                    )
+                    break
 
         evidence = self._evidence(last_result) if isinstance(last_result, dict) else {}
         if isinstance(last_result, dict):
