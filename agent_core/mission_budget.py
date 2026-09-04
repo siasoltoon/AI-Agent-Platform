@@ -24,8 +24,6 @@ class MissionBudget:
             raise ValueError("Mission budgets must be positive")
         if self.max_runtime_seconds <= 0:
             raise ValueError("max_runtime_seconds must be positive")
-        if self.per_execution_steps > self.max_steps:
-            raise ValueError("per_execution_steps cannot exceed max_steps")
 
 
 class MissionBudgetState:
