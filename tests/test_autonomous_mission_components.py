@@ -37,6 +37,7 @@ def test_memory_checkpoint_round_trip():
     assert restored.failures
     assert restored.task_attempts["testing"] == 2
     assert restored.last_execution["status"] == "completed"
+    assert restored.last_execution["mission_objective"] == "build bot"
 
 
 def test_mission_lifecycle_transition_matrix_and_terminal_protection():
