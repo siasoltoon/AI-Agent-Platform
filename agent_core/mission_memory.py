@@ -8,7 +8,7 @@ from typing import Any
 
 @dataclass
 class MissionMemory:
-    """Durable state for a mission, including enough information to resume it."""
+    """Durable state for a mission, including enough information to resume it safely."""
 
     mission_id: str
     objective: str
@@ -25,6 +25,9 @@ class MissionMemory:
     last_execution: dict[str, Any] = field(default_factory=dict)
     execution_evidence: dict[str, Any] = field(default_factory=dict)
     mission_budget: dict[str, Any] = field(default_factory=dict)
+    active_task: str = ""
+    active_execution_id: str = ""
+    checkpoint_sequence: int = 0
 
     VALID_STATUSES = {"pending", "running", "completed", "blocked", "cancelled", "interrupted"}
     TERMINAL_STATUSES = {"completed", "cancelled"}
@@ -42,6 +45,7 @@ class MissionMemory:
             raise ValueError("mission_id and objective are required")
         if self.status not in self.VALID_STATUSES:
             raise ValueError(f"Invalid mission status: {self.status}")
+        self.checkpoint_sequence = max(0, int(self.checkpoint_sequence))
 
     def transition(self, status: str) -> None:
         """Apply an explicit lifecycle transition and reject invalid state jumps."""
@@ -54,9 +58,28 @@ class MissionMemory:
         self.status = status
 
     def checkpoint(self, *, step_id: str, summary: str, evidence: dict[str, Any] | None = None) -> dict[str, Any]:
-        item = {"step_id": step_id, "summary": summary, "evidence": evidence or {}}
+        self.checkpoint_sequence += 1
+        item = {"sequence": self.checkpoint_sequence, "step_id": step_id, "summary": summary, "evidence": evidence or {}}
         self.checkpoints.append(item)
         return item
+
+    def begin_execution(self, task_id: str, execution_id: str) -> None:
+        """Persist the exact execution being attempted before external side effects occur."""
+        if not task_id.strip() or not execution_id.strip():
+            raise ValueError("task_id and execution_id are required")
+        self.active_task = task_id
+        self.active_execution_id = execution_id
+
+    def commit_execution(self, *, task_id: str, execution_id: str, result: dict[str, Any]) -> None:
+        """Record a verified execution before graph state is advanced."""
+        if self.active_task != task_id or self.active_execution_id != execution_id:
+            raise ValueError("Execution checkpoint does not match the active execution")
+        self.record_execution(result)
+        self.checkpoint(step_id=task_id, summary="verified execution committed; safe to advance task graph", evidence={"execution_id": execution_id, "verified": True})
+
+    def clear_execution(self) -> None:
+        self.active_task = ""
+        self.active_execution_id = ""
 
     def record_failure(self, step_id: str, error: str) -> None:
         self.failures.append(f"{step_id}: {error}")
@@ -68,7 +91,6 @@ class MissionMemory:
         self.task_attempts[step_id] = max(int(attempt), self.task_attempts.get(step_id, 0))
 
     def record_execution(self, result: dict[str, Any]) -> None:
-        """Keep the last real runtime result and its measured evidence for acceptance/recovery."""
         snapshot = dict(result)
         snapshot.setdefault("mission_objective", self.objective)
         self.last_execution = snapshot
@@ -121,4 +143,7 @@ class MissionMemoryStore:
             last_execution=dict(payload.get("last_execution", {})),
             execution_evidence=dict(payload.get("execution_evidence", {})),
             mission_budget=dict(payload.get("mission_budget", {})),
+            active_task=str(payload.get("active_task", "")),
+            active_execution_id=str(payload.get("active_execution_id", "")),
+            checkpoint_sequence=int(payload.get("checkpoint_sequence", 0)),
         )
