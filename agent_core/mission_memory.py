@@ -24,6 +24,7 @@ class MissionMemory:
     task_attempts: dict[str, int] = field(default_factory=dict)
     last_execution: dict[str, Any] = field(default_factory=dict)
     execution_evidence: dict[str, Any] = field(default_factory=dict)
+    mission_budget: dict[str, Any] = field(default_factory=dict)
 
     VALID_STATUSES = {"pending", "running", "completed", "blocked", "cancelled", "interrupted"}
     TERMINAL_STATUSES = {"completed", "cancelled"}
@@ -52,13 +53,7 @@ class MissionMemory:
             raise ValueError(f"Invalid mission transition: {self.status} -> {status}")
         self.status = status
 
-    def checkpoint(
-        self,
-        *,
-        step_id: str,
-        summary: str,
-        evidence: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+    def checkpoint(self, *, step_id: str, summary: str, evidence: dict[str, Any] | None = None) -> dict[str, Any]:
         item = {"step_id": step_id, "summary": summary, "evidence": evidence or {}}
         self.checkpoints.append(item)
         return item
@@ -125,4 +120,5 @@ class MissionMemoryStore:
             task_attempts={key: int(value) for key, value in payload.get("task_attempts", {}).items()},
             last_execution=dict(payload.get("last_execution", {})),
             execution_evidence=dict(payload.get("execution_evidence", {})),
+            mission_budget=dict(payload.get("mission_budget", {})),
         )
