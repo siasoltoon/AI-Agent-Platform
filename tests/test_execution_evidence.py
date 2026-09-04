@@ -1,4 +1,5 @@
 from agent_core.execution_evidence import ExecutionBudget, ExecutionEvidence, enrich_execution_evidence
+from agent_core.verification import verify_execution
 
 
 def test_execution_budget_rejects_invalid_limits():
@@ -70,3 +71,32 @@ def test_enrich_execution_evidence_uses_real_tool_records():
     assert evidence["recovery_attempts"] == 2
     assert evidence["retries"] == 1
     assert evidence["tool_outcomes"] == {"write_file": 1, "terminal": 1}
+
+
+def test_verify_execution_rejects_inconsistent_evidence_counts():
+    result = {
+        "status": "completed",
+        "execution_evidence": {
+            "verified": True,
+            "tool_calls": 2,
+            "successful_tool_calls": 2,
+        },
+        "tool_records": [{"tool": "read_file", "ok": True}],
+    }
+    verification = verify_execution(result)
+    assert not verification.verified
+    assert "evidence_tool_count_matches" in verification.blockers
+
+
+def test_verify_execution_rejects_policy_violation():
+    result = {
+        "status": "completed",
+        "execution_evidence": {
+            "verified": True,
+            "policy": {"compliant": False},
+        },
+        "tool_records": [{"tool": "read_file", "ok": True}],
+    }
+    verification = verify_execution(result)
+    assert not verification.verified
+    assert "policy_compliant" in verification.blockers
