@@ -1,0 +1,65 @@
+"""Deterministic orchestration boundary for professional autonomous missions."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any, Callable
+
+from agent_core.autonomous_developer import AutonomousDeveloper
+from agent_core.mission_contract import MissionContract
+
+
+class MissionPhase(str, Enum):
+    CONTRACT = "contract"
+    RECON = "recon"
+    PLAN = "plan"
+    EXECUTE = "execute"
+    VERIFY = "verify"
+    ACCEPT = "accept"
+    COMPLETE = "complete"
+    BLOCKED = "blocked"
+    CANCELLED = "cancelled"
+
+
+@dataclass(frozen=True)
+class MissionEvent:
+    phase: MissionPhase
+    status: str
+    mission_id: str
+    detail: str = ""
+
+
+class MissionOrchestrator:
+    """Own the mission lifecycle while delegating durable execution to AutonomousDeveloper."""
+
+    def __init__(self, developer: AutonomousDeveloper, event_sink: Callable[[MissionEvent], None] | None = None):
+        self.developer = developer
+        self.event_sink = event_sink
+
+    def _emit(self, event: MissionEvent) -> None:
+        if self.event_sink is not None:
+            self.event_sink(event)
+
+    @staticmethod
+    def contract(objective: str) -> MissionContract:
+        return MissionContract.from_objective(objective)
+
+    def run(self, mission_id: str, objective: str, max_retries: int = 3) -> dict[str, Any]:
+        contract = self.contract(objective)
+        self._emit(MissionEvent(MissionPhase.CONTRACT, "completed", mission_id, str(contract.snapshot())))
+        for phase in (MissionPhase.RECON, MissionPhase.PLAN, MissionPhase.EXECUTE):
+            self._emit(MissionEvent(phase, "delegated", mission_id))
+
+        result = self.developer.run(mission_id, objective, max_retries=max_retries)
+        status = str(result.get("status", "blocked"))
+        terminal_phase = MissionPhase.COMPLETE if status == "completed" else MissionPhase.CANCELLED if status == "cancelled" else MissionPhase.BLOCKED
+        self._emit(MissionEvent(MissionPhase.VERIFY, "completed" if result.get("verified") else "evaluated", mission_id))
+        self._emit(MissionEvent(MissionPhase.ACCEPT, "accepted" if result.get("acceptance", {}).get("accepted") else "evaluated", mission_id))
+        self._emit(MissionEvent(terminal_phase, status, mission_id))
+        return {**result, "mission_contract": contract.snapshot()}
+
+    def cancel(self, mission_id: str) -> dict[str, Any]:
+        result = self.developer.cancel(mission_id)
+        self._emit(MissionEvent(MissionPhase.CANCELLED, "cancelled", mission_id))
+        return result
