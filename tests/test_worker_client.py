@@ -1,6 +1,10 @@
 import pytest
 
-from backend.services.worker_client import WorkerClient, WorkerExecutionError
+from backend.services.worker_client import (
+    WORKER_HTTP_TIMEOUT_MARGIN_SECONDS,
+    WorkerClient,
+    WorkerExecutionError,
+)
 
 
 class FakeResponse:
@@ -54,13 +58,6 @@ def test_worker_client_reports_non_json_worker_error(monkeypatch):
 
 
 def test_worker_client_marks_timeout_as_ambiguous(monkeypatch):
-    def raise_timeout(*args, **kwargs):
-        raise TimeoutError("network timeout")
-
-    monkeypatch.setattr("backend.services.worker_client.requests.post", raise_timeout)
-
-    # requests.Timeout is intentionally raised here so the client can preserve
-    # the distinction between an ambiguous execution and a definitive failure.
     import requests
 
     def raise_requests_timeout(*args, **kwargs):
@@ -92,4 +89,21 @@ def test_worker_client_marks_connection_failure_as_ambiguous(monkeypatch):
     error = exc_info.value
     assert error.retryable is True
     assert error.ambiguous is True
+    assert error.status_code is None
     assert error.task_id == "task-3"
+
+
+def test_worker_client_gives_http_transport_a_grace_window(monkeypatch):
+    captured = {}
+
+    def return_response(*args, **kwargs):
+        captured.update(kwargs)
+        return FakeResponse(200, {"status": "completed"})
+
+    monkeypatch.setattr("backend.services.worker_client.requests.post", return_response)
+
+    WorkerClient("127.0.0.1", 8001).execute_task(
+        {"task_id": "task-4", "prompt": "finish", "timeout": 900}
+    )
+
+    assert captured["timeout"] == pytest.approx(900 + WORKER_HTTP_TIMEOUT_MARGIN_SECONDS)
