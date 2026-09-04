@@ -74,8 +74,10 @@ class MissionMemory:
 
     def record_execution(self, result: dict[str, Any]) -> None:
         """Keep the last real runtime result and its measured evidence for acceptance/recovery."""
-        self.last_execution = result
-        evidence = result.get("execution_evidence")
+        snapshot = dict(result)
+        snapshot.setdefault("mission_objective", self.objective)
+        self.last_execution = snapshot
+        evidence = snapshot.get("execution_evidence")
         if isinstance(evidence, dict):
             self.execution_evidence = dict(evidence)
 
