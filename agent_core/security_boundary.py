@@ -18,7 +18,7 @@ class WorkspaceBoundary:
         try:
             resolved.relative_to(self.root)
         except ValueError as exc:
-            raise PermissionError(f"Path escapes mission workspace: {path}") from exc
+            raise PermissionError(f"Path escapes the configured workspace: {path}") from exc
         return resolved
 
     def assert_safe(self, path: str | os.PathLike[str]) -> Path:
