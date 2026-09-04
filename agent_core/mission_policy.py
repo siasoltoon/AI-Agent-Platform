@@ -19,12 +19,15 @@ class MissionPolicy:
         text = (task or "").lower()
         read_only_patterns = (
             r"\bread[- ]only\b",
-            r"\bdo not (?:modify|change|write|delete|create|alter)\b",
-            r"\bdon['’]t (?:modify|change|write|delete|create|alter)\b",
-            r"\bwithout (?:modifying|changing|writing|deleting|creating|altering|making changes)\b",
-            r"\bno changes?\b",
+            r"\bdo not (?:modify|change|write|delete|create) (?:any|the|all|files?|workspace)\b(?!.*\bother\b)",
+            r"\bdon['’]t (?:modify|change|write|delete|create) (?:any|the|all|files?|workspace)\b(?!.*\bother\b)",
+            r"\bwithout (?:modifying|changing|writing|deleting|creating|altering) (?:anything|any files?|the workspace)\b",
             r"\bwithout making changes\b",
+            r"\bmake no changes\b",
+            r"\bno changes?\b",
             r"\b(?:inspect|inspection|audit|review) only\b",
+            r"\bdo not alter (?:the )?(?:workspace|repository|files?)\b",
+            r"\bdo not make any changes\b",
         )
         return cls(read_only=any(re.search(pattern, text) for pattern in read_only_patterns))
 
@@ -33,7 +36,7 @@ class MissionPolicy:
             return True
         normalized = str(tool).strip().lower()
         # Terminal is denied completely in read-only mode. A shell command cannot
-        # be made safely read-only by checking only its first token (e.g. git commit).
+        # be made safely read-only by checking only its first token.
         return normalized not in _MUTATING_TOOLS and normalized != "terminal"
 
     def describe_violation(self, tool: str, args: dict[str, Any] | None = None) -> str:
