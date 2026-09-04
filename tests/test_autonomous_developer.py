@@ -9,7 +9,10 @@ class FakeRuntime:
     def execute(self, prompt, task_id=None, metadata=None):
         self.calls.append((task_id, metadata))
         task_id_text = str(task_id or "")
-        records = [{"tool": "terminal", "ok": True, "result": {"command": "pytest -q", "code": 0}}] if ":verification:" in task_id_text else [{"ok": True}]
+        if ":verification:" in task_id_text:
+            records = [{"tool": "terminal", "ok": True, "result": {"command": "pytest -q", "code": 0}}]
+        else:
+            records = [{"tool": "read_file", "ok": True, "result": {"path": "README.md", "content": "observed"}}]
         return {"result": {"result": {"status": "completed", "execution_evidence": {"verified": True}, "tool_records": records}}}
 
 
@@ -76,7 +79,7 @@ def test_cancellation_requested_during_execution_is_honored():
         def execute(self, prompt, task_id=None, metadata=None):
             self.calls.append((task_id, metadata))
             developer.cancel("m5")
-            return {"result": {"result": {"status": "completed", "execution_evidence": {"verified": True}, "tool_records": [{"ok": True}]}}}
+            return {"result": {"result": {"status": "completed", "execution_evidence": {"verified": True}, "tool_records": [{"tool": "read_file", "ok": True}]}}}
 
     developer = AutonomousDeveloper(CancellingRuntime(), memory_store=store)
     result = developer.run("m5", "cancel during execution")
