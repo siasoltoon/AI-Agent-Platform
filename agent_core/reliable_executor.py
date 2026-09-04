@@ -10,6 +10,7 @@ from typing import Any
 
 from agent_core.execution_agent import AgentExecutionError, AgentExecutor
 from agent_core.execution_evidence import ExecutionBudget, enrich_execution_evidence
+from agent_core.mission_policy import MissionPolicy
 from backend.services.ollama_service import OllamaService
 
 logger = logging.getLogger("ai_agent_reliable_executor")
@@ -78,12 +79,7 @@ class ReliableAgentExecutor:
     def _quality_requirements(cls, prompt: str) -> dict[str, bool]:
         lower = cls._remove_non_instructional_test_mentions(prompt).lower()
         return {
-            "tests": bool(re.search(
-                r"\b(?:run|execute|perform|write|create|add|build|pass|fix|verify|validate)\s+(?:the\s+)?(?:automated\s+)?(?:tests?|test suite)\b"
-                r"|\b(?:pytest|test suite|automated tests|unit tests|integration tests)\b"
-                r"|\btests?\s+(?:must|should|need to)\s+(?:pass|run|execute)\b",
-                lower,
-            )),
+            "tests": bool(re.search(r"\b(?:run|execute|perform|write|create|add|build|pass|fix|verify|validate)\s+(?:the\s+)?(?:automated\s+)?(?:tests?|test suite)\b|\b(?:pytest|test suite|automated tests|unit tests|integration tests)\b|\btests?\s+(?:must|should|need to)\s+(?:pass|run|execute)\b", lower)),
             "build": bool(re.search(r"\b(?:build|compile|compilation|compiling|npm\s+run\s+build)\b", lower)),
             "inspect": bool(re.search(r"\b(inspect|review|audit)\b", lower)),
             "verify": bool(re.search(r"\b(verify|verification|validate|validation|check)\b", lower)),
@@ -105,26 +101,31 @@ class ReliableAgentExecutor:
         if not successful:
             blockers.append("no_successful_tool_action")
 
+        policy = MissionPolicy.from_task(prompt)
+        policy_evidence = evidence.get("policy")
+        if policy.read_only:
+            if not isinstance(policy_evidence, dict):
+                blockers.append("mission_policy_evidence_missing")
+            elif policy_evidence.get("read_only") is not True or policy_evidence.get("compliant") is not True:
+                blockers.append("mission_policy_violation")
+            if any(record.get("policy_violation") for record in records):
+                blockers.append("mission_policy_violation")
+            if any(record.get("ok") is True and record.get("tool") in {"write_file", "make_directory", "copy_file", "move_file", "delete_file", "terminal"} for record in records):
+                blockers.append("unauthorized_mutation_or_terminal_execution")
+
         tools = {str(record.get("tool", "")).lower() for record in successful}
         terminal_records = [record for record in successful if str(record.get("tool", "")).lower() == "terminal" or str(record.get("tool", "")).lower() in {"pytest", "python", "py", "pip", "npm", "node", "ruff", "mypy", "black", "vite"}]
 
-        if requirements["tests"] and not any(
-            cls._terminal_succeeded(record)
-            and ("pytest" in cls._command(record).lower() or ("test" in cls._command(record).lower() and any(token in cls._command(record).lower() for token in ("python", "py", "npm", "yarn", "pnpm", "cargo", "go"))))
-            for record in terminal_records
-        ):
+        if requirements["tests"] and not any(cls._terminal_succeeded(record) and ("pytest" in cls._command(record).lower() or ("test" in cls._command(record).lower() and any(token in cls._command(record).lower() for token in ("python", "py", "npm", "yarn", "pnpm", "cargo", "go")))) for record in terminal_records):
             blockers.append("requested_tests_not_executed_successfully")
 
-        if requirements["build"] and not any(
-            cls._terminal_succeeded(record) and any(token in cls._command(record).lower() for token in ("build", "compile", "py_compile"))
-            for record in terminal_records
-        ):
+        if requirements["build"] and not any(cls._terminal_succeeded(record) and any(token in cls._command(record).lower() for token in ("build", "compile", "py_compile")) for record in terminal_records):
             blockers.append("requested_build_or_compile_not_executed_successfully")
 
         if requirements["inspect"] and not (tools & {"read_file", "list_directory", "search_files", "file_exists", "directory_exists", "terminal"}):
             blockers.append("requested_inspection_not_observed")
 
-        return not blockers, blockers
+        return not blockers, list(dict.fromkeys(blockers))
 
     def _continuation_prompt(self, prompt: str, attempt: int, error: str, result: dict[str, Any] | None) -> str:
         summary = ""
@@ -182,13 +183,7 @@ The goal of this recovery attempt is to finish the ORIGINAL MISSION, not to expl
             effective_prompt = original if attempt == 1 else self._continuation_prompt(original, attempt, last_error, last_result)
             executor = AgentExecutor(self.ollama, workspace_root=self.workspace_root, max_steps=self.max_steps, max_output_chars=self.max_output_chars)
             attempt_started_at = monotonic()
-            logger.info(
-                "Reliable agent attempt started attempt=%s max_attempts=%s elapsed_seconds=%.3f remaining_budget_seconds=%.3f",
-                attempt,
-                self.max_attempts,
-                elapsed_before_attempt,
-                max(0.0, self.budget.max_runtime_seconds - elapsed_before_attempt),
-            )
+            logger.info("Reliable agent attempt started attempt=%s max_attempts=%s elapsed_seconds=%.3f remaining_budget_seconds=%.3f", attempt, self.max_attempts, elapsed_before_attempt, max(0.0, self.budget.max_runtime_seconds - elapsed_before_attempt))
             try:
                 result = executor.execute(effective_prompt)
                 result = enrich_execution_evidence(result, started_at=started_at, recovery_attempts=attempt - 1, retries=attempt - 1)
@@ -210,72 +205,35 @@ The goal of this recovery attempt is to finish the ORIGINAL MISSION, not to expl
                     result["execution_evidence"]["budget_exceeded"] = budget_reason
                     last_error = f"Execution budget exceeded: {budget_reason}"
                     attempt_records.append({"attempt": attempt, "accepted": False, "blocker": budget_reason})
-                    logger.warning(
-                        "Reliable agent attempt blocked attempt=%s reason=%s attempt_elapsed_seconds=%.3f total_elapsed_seconds=%.3f",
-                        attempt,
-                        budget_reason,
-                        monotonic() - attempt_started_at,
-                        monotonic() - started_at,
-                    )
+                    logger.warning("Reliable agent attempt blocked attempt=%s reason=%s attempt_elapsed_seconds=%.3f total_elapsed_seconds=%.3f", attempt, budget_reason, monotonic() - attempt_started_at, monotonic() - started_at)
                     break
 
                 accepted, blockers = self._quality_gate(original, result)
                 attempt_records.append({"attempt": attempt, "accepted": accepted, "blockers": blockers})
                 if accepted:
-                    logger.info(
-                        "Reliable agent attempt accepted attempt=%s attempt_elapsed_seconds=%.3f total_elapsed_seconds=%.3f",
-                        attempt,
-                        monotonic() - attempt_started_at,
-                        monotonic() - started_at,
-                    )
+                    logger.info("Reliable agent attempt accepted attempt=%s attempt_elapsed_seconds=%.3f total_elapsed_seconds=%.3f", attempt, monotonic() - attempt_started_at, monotonic() - started_at)
                     result["reliability"] = {"attempts": attempt, "self_repaired": attempt > 1, "quality_gate": "passed", "attempt_history": attempt_records}
                     return result
                 last_error = "Completion quality gate rejected the attempt: " + ", ".join(blockers)
-                logger.warning(
-                    "Reliable agent quality gate rejected attempt=%s blockers=%s attempt_elapsed_seconds=%.3f total_elapsed_seconds=%.3f",
-                    attempt,
-                    blockers,
-                    monotonic() - attempt_started_at,
-                    monotonic() - started_at,
-                )
+                logger.warning("Reliable agent quality gate rejected attempt=%s blockers=%s attempt_elapsed_seconds=%.3f total_elapsed_seconds=%.3f", attempt, blockers, monotonic() - attempt_started_at, monotonic() - started_at)
             except Exception as exc:
                 if getattr(self.ollama, "cancelled", False):
                     last_error = "Agent execution cancelled."
                     attempt_records.append({"attempt": attempt, "accepted": False, "cancelled": True})
-                    logger.warning(
-                        "Reliable agent attempt cancelled attempt=%s attempt_elapsed_seconds=%.3f total_elapsed_seconds=%.3f",
-                        attempt,
-                        monotonic() - attempt_started_at,
-                        monotonic() - started_at,
-                    )
+                    logger.warning("Reliable agent attempt cancelled attempt=%s attempt_elapsed_seconds=%.3f total_elapsed_seconds=%.3f", attempt, monotonic() - attempt_started_at, monotonic() - started_at)
                     break
                 partial = getattr(exc, "partial_result", None)
                 if isinstance(partial, dict):
                     last_result = enrich_execution_evidence(partial, started_at=started_at, recovery_attempts=attempt - 1, retries=attempt - 1)
                 last_error = f"{type(exc).__name__}: {exc}"
                 attempt_records.append({"attempt": attempt, "accepted": False, "error": last_error})
-                logger.warning(
-                    "Reliable agent attempt failed attempt=%s error_type=%s has_partial_result=%s attempt_elapsed_seconds=%.3f total_elapsed_seconds=%.3f error=%s",
-                    attempt,
-                    type(exc).__name__,
-                    isinstance(partial, dict),
-                    monotonic() - attempt_started_at,
-                    monotonic() - started_at,
-                    exc,
-                )
+                logger.warning("Reliable agent attempt failed attempt=%s error_type=%s has_partial_result=%s attempt_elapsed_seconds=%.3f total_elapsed_seconds=%.3f error=%s", attempt, type(exc).__name__, isinstance(partial, dict), monotonic() - attempt_started_at, monotonic() - started_at, exc)
                 if not isinstance(partial, dict):
-                    logger.warning(
-                        "Reliable agent recovery suppressed after zero-progress failure attempt=%s error_type=%s",
-                        attempt,
-                        type(exc).__name__,
-                    )
+                    logger.warning("Reliable agent recovery suppressed after zero-progress failure attempt=%s error_type=%s", attempt, type(exc).__name__)
                     break
 
         evidence = self._evidence(last_result) if isinstance(last_result, dict) else {}
         if isinstance(last_result, dict):
             last_result["reliability"] = {"attempts": len(attempt_records), "self_repaired": len(attempt_records) > 1, "quality_gate": "blocked", "attempt_history": attempt_records}
             last_result["execution_evidence"] = evidence
-        raise AgentExecutionError(
-            f"Agent could not complete the task within execution budgets after {len(attempt_records)} attempts. Last failure: {last_error or 'execution budget exhausted'}",
-            partial_result=last_result,
-        )
+        raise AgentExecutionError(f"Agent could not complete the task within execution budgets after {len(attempt_records)} attempts. Last failure: {last_error or 'execution budget exhausted'}", partial_result=last_result)
