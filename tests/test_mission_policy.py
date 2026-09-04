@@ -11,6 +11,15 @@ def test_read_only_detected_from_explicit_constraints():
         assert MissionPolicy.from_task(task).read_only is True
 
 
+def test_target_write_exception_is_not_misclassified_as_read_only():
+    task = (
+        "Create agent-full-e2e.txt with exactly: expected. "
+        "Do not modify or delete any other files."
+    )
+    policy = MissionPolicy.from_task(task)
+    assert policy.read_only is False
+
+
 def test_read_only_allows_observation_tools():
     policy = MissionPolicy.from_task("Read-only repository inspection.")
     for tool in ("read_file", "file_exists", "directory_exists", "list_directory", "search_files", "file_hash"):
