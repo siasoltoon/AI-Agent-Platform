@@ -66,7 +66,7 @@ def test_agent_executor_requires_read_for_explicit_verification(tmp_path: Path):
     assert result["steps"][1]["verification"]["verified"] is False
     assert any(c["type"] == "file_content_matches_write" and c["passed"] for c in result["execution_evidence"]["checks"])
     assert "MANDATORY EXACT-CONTENT VERIFICATION PROTOCOL" in ollama.prompts[0]
-    assert "MUST now call read_file" in ollama.prompts[1]
+    assert "Continue, recover, or verify before done." in ollama.prompts[1]
 
 
 def test_agent_executor_requires_read_after_write_even_when_model_tries_done(tmp_path: Path):
