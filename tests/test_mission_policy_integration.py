@@ -51,8 +51,8 @@ def test_read_only_policy_blocks_terminal_and_survives_recovery(tmp_path: Path):
 
     assert not (tmp_path / "blocked.txt").exists()
     assert "MISSION POLICY" in ollama.prompts[0]
-    assert "POLICY VIOLATION BLOCKED" in ollama.prompts[1]
-    assert "POLICY VIOLATION BLOCKED" in ollama.prompts[2]
+    assert "MISSION POLICY VIOLATION" in ollama.prompts[1]
+    assert "MISSION POLICY VIOLATION" in ollama.prompts[2]
     partial = exc_info.value.partial_result
     assert partial is not None
     assert partial["execution_evidence"]["policy"]["read_only"] is True
