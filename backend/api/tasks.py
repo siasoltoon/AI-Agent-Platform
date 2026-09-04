@@ -9,6 +9,7 @@ import uuid
 
 from fastapi import APIRouter, HTTPException
 
+from agent_core.mission_service import MissionService
 from agent_core.runtime import AgentRuntime
 from backend.storage.task_store import TaskQueueCapacityError, TaskStore
 from config.production_config import CONFIG
@@ -24,13 +25,26 @@ command_registry = CommandRegistry()
 task_router = TaskRouter(command_registry)
 TASK_STORE = TaskStore(os.getenv("TASK_DB_PATH", "data/tasks.db"))
 TASK_RUNNER = None
+mission_service = MissionService(runtime=runtime)
 
 
 def _execute_agent_task(task: TaskRequest, *, task_id: str) -> dict:
     return runtime.execute(prompt=task.prompt, model=task.model, task_id=task_id, timeout_seconds=task.timeout_seconds, metadata=task.metadata)
 
 
+def _execute_mission_task(task: TaskRequest, *, task_id: str) -> dict:
+    """Dispatch explicitly requested professional missions through the real orchestrator."""
+    return mission_service.execute(
+        task.prompt,
+        task_id=task_id,
+        model=task.model,
+        timeout_seconds=task.timeout_seconds,
+        metadata=task.metadata,
+    )
+
+
 command_registry.register("agent.execute", _execute_agent_task)
+command_registry.register("mission.execute", _execute_mission_task)
 
 
 async def _create_task(task: TaskRequest) -> TaskResponse:
