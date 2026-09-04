@@ -97,3 +97,32 @@ def test_execute_carries_partial_result_into_recovery_prompt(monkeypatch, tmp_pa
     assert result["reliability"]["attempts"] == 2
     assert "print('ok')" in prompts[1]
     assert "No usable previous result was returned." not in prompts[1]
+
+
+def test_execute_suppresses_recovery_after_zero_progress_failure(monkeypatch, tmp_path):
+    calls = []
+
+    class FakeExecutor:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def execute(self, prompt):
+            calls.append(prompt)
+            raise AgentExecutionError("Agent stopped without executing any tool action.")
+
+    monkeypatch.setattr("agent_core.reliable_executor.AgentExecutor", FakeExecutor)
+    executor = ReliableAgentExecutor(
+        ollama=object(),
+        workspace_root=str(tmp_path),
+        max_steps=4,
+        max_attempts=6,
+    )
+
+    try:
+        executor.execute("Create hello.txt exactly once.")
+    except AgentExecutionError as exc:
+        assert "after 1 attempts" in str(exc)
+    else:
+        raise AssertionError("Expected AgentExecutionError")
+
+    assert len(calls) == 1
