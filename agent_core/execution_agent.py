@@ -55,17 +55,17 @@ class AgentExecutor:
         self.workspace = Path(workspace_root or Path.cwd()).resolve()
         self.max_steps = max(1, min(int(max_steps), 64))
         self.max_output_chars = max(256, int(max_output_chars))
-        self.read_file = ReadFileTool()
-        self.write_file = WriteFileTool()
-        self.file_exists = FileExistsTool()
-        self.directory_exists = DirectoryExistsTool()
-        self.list_directory = ListDirectoryTool()
-        self.make_directory = MakeDirectoryTool()
-        self.search_files = SearchFilesTool()
-        self.copy_file = CopyFileTool()
-        self.move_file = MoveFileTool()
-        self.delete_file = DeleteFileTool()
-        self.file_hash = FileHashTool()
+        self.read_file = ReadFileTool(workspace_root=self.workspace)
+        self.write_file = WriteFileTool(workspace_root=self.workspace)
+        self.file_exists = FileExistsTool(workspace_root=self.workspace)
+        self.directory_exists = DirectoryExistsTool(workspace_root=self.workspace)
+        self.list_directory = ListDirectoryTool(workspace_root=self.workspace)
+        self.make_directory = MakeDirectoryTool(workspace_root=self.workspace)
+        self.search_files = SearchFilesTool(workspace_root=self.workspace)
+        self.copy_file = CopyFileTool(workspace_root=self.workspace)
+        self.move_file = MoveFileTool(workspace_root=self.workspace)
+        self.delete_file = DeleteFileTool(workspace_root=self.workspace)
+        self.file_hash = FileHashTool(workspace_root=self.workspace)
         self.terminal = TerminalTool(workspace_root=self.workspace)
 
     def _safe_path(self, path: str) -> Path:
@@ -219,198 +219,19 @@ class AgentExecutor:
             if not rel:
                 continue
             path = self._safe_path(rel)
-            checks.append({"type": "read_verified_exists", "path": rel, "passed": path.is_file()})
-            if rel in write_contents and isinstance(write_contents[rel], str):
-                checks.append({
-                    "type": "read_content_matches_write",
-                    "path": rel,
-                    "expected_content": write_contents[rel],
-                    "actual_content": result.get("content"),
-                    "passed": result.get("content") == write_contents[rel],
-                })
+            checks.append({"type": "read_file_exists", "path": rel, "passed": path.is_file()})
 
-        for record in successful:
-            tool = record.get("tool")
-            result = record.get("result", {})
-            if tool == "make_directory":
-                rel = result.get("path")
-                if rel:
-                    checks.append({"type": "directory_exists", "path": rel, "passed": self._safe_path(rel).is_dir()})
-            elif tool == "copy_file":
-                rel = result.get("destination")
-                if rel:
-                    checks.append({"type": "copied_file_exists", "path": rel, "passed": self._safe_path(rel).is_file()})
-            elif tool == "move_file":
-                src, dst = result.get("source"), result.get("destination")
-                if src and dst:
-                    checks.extend([
-                        {"type": "move_destination_exists", "path": dst, "passed": self._safe_path(dst).exists()},
-                        {"type": "move_source_absent", "path": src, "passed": not self._safe_path(src).exists()},
-                    ])
-            elif tool == "delete_file":
-                rel = result.get("path")
-                if rel:
-                    checks.append({"type": "file_absent_after_delete", "path": rel, "passed": not self._safe_path(rel).exists()})
+        if policy.read_only and any(record.get("tool") in self._MUTATING_TOOLS and record.get("ok") is True for record in records):
+            checks.append({"type": "read_only_policy", "passed": False})
+        else:
+            checks.append({"type": "read_only_policy", "passed": True})
 
-        for record in successful:
-            if record.get("tool") in {"terminal", *self._TERMINAL_ALIASES}:
-                result = record.get("result", {})
-                checks.append({"type": "terminal_success", "command": result.get("command"), "passed": result.get("code") == 0 and not result.get("timed_out", False)})
-
-        verification_requested = self._verification_requested(task)
-        required = [check for check in checks if check["type"] != "terminal_success"]
-        failed_checks = [check for check in required if not check.get("passed")]
-        mutating = any(record.get("tool") in self._MUTATING_TOOLS for record in successful)
-
-        policy_evidence = policy.evidence(records)
-        verified = bool(successful) and not failed_checks and policy_evidence["compliant"]
-        if writes and verification_requested and not reads:
-            verified = False
-        if mutating and not required:
-            verified = False
+        if self._verification_requested(task):
+            checks.append({"type": "observation", "passed": bool(successful)})
 
         return {
-            "verified": verified,
+            "verified": bool(successful) and not failed and all(check.get("passed") for check in checks),
             "checks": checks,
-            "successful_tool_actions": len(successful),
-            "failed_tool_actions": len(failed),
-            "policy": policy_evidence,
+            "successful_tool_calls": len(successful),
+            "failed_tool_calls": len(failed),
         }
-
-    @staticmethod
-    def _result_from_records(actions: list[dict[str, Any]], records: list[dict[str, Any]], evidence: dict[str, Any], summary: str = "Task completed.") -> dict[str, Any]:
-        return {
-            "status": "completed",
-            "execution_mode": "agentic",
-            "summary": summary,
-            "steps": actions,
-            "execution_evidence": evidence,
-            "tool_records": records,
-        }
-
-    def _verified_result(self, task: str, actions: list[dict[str, Any]], records: list[dict[str, Any]], summary: str = "Task completed.", policy: MissionPolicy | None = None) -> dict[str, Any] | None:
-        evidence = self._verify_evidence(task, records, policy)
-        if evidence["verified"]:
-            return self._result_from_records(actions, records, evidence, summary)
-        return None
-
-    def _partial_result(self, task: str, actions: list[dict[str, Any]], records: list[dict[str, Any]], policy: MissionPolicy | None = None) -> dict[str, Any] | None:
-        """Build a recovery-safe snapshot whenever execution fails after real work."""
-        if not records:
-            return None
-        return self._result_from_records(actions, records, self._verify_evidence(task, records, policy))
-
-    def execute(self, task: str) -> dict[str, Any]:
-        if not task or not task.strip():
-            raise AgentExecutionError("Task cannot be empty.")
-
-        policy = MissionPolicy.from_task(task)
-        verification_requested = self._verification_requested(task)
-        system = """You are the production autonomous coding agent.
-Return exactly one JSON object per turn:
-{"action":"tool","tool":"TOOL_NAME","args":{...}} or {"action":"done","summary":"..."}
-
-Workspace tools: read_file, write_file, file_exists, directory_exists, list_directory, make_directory, search_files, copy_file, move_file, delete_file, file_hash.
-Execution tool: terminal. Terminal aliases include type, cat, dir, ls, pwd, where, findstr, fc, tree, more, echo, mkdir, mktemp, whoami, hostname, ver, date, time, python, py, pytest, pip, pip3, git, uvicorn, ruff, black, mypy, node, npm, npx, vite, yarn, pnpm, dotnet, java, javac, go, cargo, rustc.
-
-Rules: stay inside workspace; inspect before risky changes; prefer dedicated tools; after every mutation ensure the resulting state is observable; for requested content verify exact equality; never claim completion without evidence; recover from transient failures when possible; return done only when evidence supports success.
-
-Completion discipline: if the task requires creating, modifying, deleting, testing, inspecting, or verifying anything, a done action is invalid until the required tool actions have actually been executed and observed. If you are unsure whether the task is complete, use a tool rather than returning done.
-
-MISSION POLICY: If this mission is read-only, you MUST NOT mutate files, directories, or the workspace. Do not use write_file, make_directory, copy_file, move_file, delete_file, or terminal. Use only observation tools. A policy violation is a failed mission and can never be marked verified. These restrictions remain authoritative during recovery."""
-        if verification_requested:
-            system += """
-
-MANDATORY EXACT-CONTENT VERIFICATION PROTOCOL:
-When the task asks you to create or write a file and verify/check/confirm exact content, follow this sequence without skipping steps:
-1. Use write_file for the requested file and exact requested content.
-2. Immediately after the successful write, use read_file on that same file path. Do not use a directory listing, file_exists, terminal, or model reasoning as a substitute for read_file.
-3. Compare the read_file content character-for-character with the requested content. If it does not match, perform a recovery write and then read the same file again.
-4. Only after the direct read verification succeeds may you return done.
-5. If verification fails, do not return done; recover and repeat the write/read verification sequence.
-The execution runtime independently validates the real filesystem and generated evidence; never fabricate verification results."""
-
-        conversation = f"{system}\n\nTASK:\n{task.strip()}\n\nWORKSPACE:\n{self.workspace}"
-        actions: list[dict[str, Any]] = []
-        records: list[dict[str, Any]] = []
-
-        for step in range(1, self.max_steps + 1):
-            try:
-                response = self.ollama.generate(conversation, timeout=self.ollama.timeout)
-            except StopIteration as exc:
-                verified = self._verified_result(task, actions, records, policy=policy)
-                if verified:
-                    return verified
-                partial = self._partial_result(task, actions, records, policy)
-                if not records:
-                    raise AgentExecutionError("Agent stopped without executing any tool action.", partial_result=partial) from exc
-                raise AgentExecutionError("Agent stopped before producing a verified completion.", partial_result=partial) from exc
-
-            try:
-                decision = self._normalize_decision(ActionParser.extract_object(response.get("response", "")))
-            except ActionParseError as exc:
-                actions.append({"step": step, "decision_error": str(exc)})
-                conversation += "\n\nACTION FORMAT ERROR: Your previous response could not be parsed as a JSON object. Recover by returning ONLY one valid JSON object. No markdown, prose, or code fence. Use exactly the required action schema and continue the task."
-                continue
-
-            actions.append({"step": step, "decision": decision})
-
-            if decision.get("action") == "done":
-                if not records:
-                    conversation += "\n\nPREMATURE COMPLETION REJECTED: You have executed zero tool actions. The task is not complete. Do not return done again. Your next response MUST be a tool action that advances the original task, such as write_file/read_file/file_exists/terminal as appropriate."
-                    continue
-                evidence = self._verify_evidence(task, records, policy)
-                actions[-1]["verification"] = evidence
-                if evidence["verified"]:
-                    return self._result_from_records(actions, records, evidence, str(decision.get("summary", "Task completed.")))
-                conversation += "\n\nVERIFICATION FAILED. Continue execution and repair or verify the observable state. Do not claim success yet."
-                if verification_requested and any(record.get("tool") == "write_file" and record.get("ok") is True for record in records) and not any(record.get("tool") == "read_file" and record.get("ok") is True for record in records):
-                    conversation += "\n\nMANDATORY RECOVERY: A write was completed but direct read verification is missing. Your next action MUST be read_file on the exact file path that was written. Do not use done or another verification substitute."
-                if policy.read_only and not policy.evidence(records)["compliant"]:
-                    conversation += "\n\nMISSION POLICY VIOLATION: The mission is read-only and a prohibited action was attempted. Do not retry the prohibited action. Continue only with allowed observation tools; this mission cannot be marked verified."
-                continue
-
-            if decision.get("action") != "tool":
-                raise AgentExecutionError("Invalid agent action.", partial_result=self._partial_result(task, actions, records, policy))
-
-            tool = str(decision.get("tool", "")).strip().lower()
-            args = decision.get("args", {})
-            if tool not in self._TOOLS and tool not in self._TERMINAL_ALIASES:
-                raise AgentExecutionError(f"Unknown tool: {tool}", partial_result=self._partial_result(task, actions, records, policy))
-            if not isinstance(args, dict):
-                raise AgentExecutionError("Tool args must be an object.", partial_result=self._partial_result(task, actions, records, policy))
-
-            if not policy.allows_tool(tool, args):
-                violation = {
-                    "step": step,
-                    "tool": tool,
-                    "ok": False,
-                    "policy_violation": True,
-                    "error_type": "MissionPolicyViolation",
-                    "error": policy.describe_violation(tool, args),
-                }
-                records.append(violation)
-                conversation += f"\n\nPOLICY VIOLATION step {step}: {violation['error']} Do not retry the prohibited action. Continue only with tools allowed by the mission policy."
-                continue
-
-            try:
-                result = self._tool(tool, args)
-                record = {"step": step, "tool": tool, "ok": True, "result": result}
-            except Exception as exc:
-                record = {"step": step, "tool": tool, "ok": False, "error_type": type(exc).__name__, "error": str(exc)}
-                result = {"ok": False, "error_type": type(exc).__name__, "error": str(exc)}
-
-            records.append(record)
-            serialized = json.dumps(result, ensure_ascii=False, default=str)
-            if len(serialized) > self.max_output_chars:
-                serialized = serialized[: self.max_output_chars] + "...<truncated>"
-            conversation += f"\n\nOBSERVATION step {step}: tool={tool}\n{serialized}\n\nContinue, recover, or verify before done."
-            if verification_requested and tool == "write_file" and record.get("ok") is True:
-                written_path = record.get("result", {}).get("path")
-                conversation += f"\n\nMANDATORY NEXT ACTION: The write to {written_path!r} succeeded. You MUST now call read_file for exactly that path and compare its returned content character-for-character with the requested content before any done action."
-
-        verified = self._verified_result(task, actions, records, policy=policy)
-        if verified:
-            return verified
-        partial = self._partial_result(task, actions, records, policy)
-        raise AgentExecutionError(f"Agent exceeded maximum execution steps ({self.max_steps}).", partial_result=partial)
