@@ -101,6 +101,7 @@ class MissionBudgetState:
             "consumed_tool_calls": self.tool_calls,
             "consumed_output_chars": self.output_chars,
             "consumed_recovery_attempts": self.recovery_attempts,
+            "tasks_started": self.tasks_started,
             "started_at": self.started_at,
             "elapsed_seconds": self.elapsed_seconds(),
             "remaining": self.remaining(),
