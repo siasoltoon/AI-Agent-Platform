@@ -79,6 +79,7 @@ class Worker:
         self._completed_results: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._inflight_task_ids: set[str] = set()
         self._cancellation_events: dict[str, threading.Event] = {}
+        self._cancellation_requested_at: dict[str, float] = {}
 
     def _claim_task_id(self, task_id: str | None) -> dict[str, Any] | None:
         if not task_id:
@@ -116,6 +117,7 @@ class Worker:
         event = threading.Event()
         with self._cancellation_lock:
             self._cancellation_events[task_id] = event
+            self._cancellation_requested_at.pop(task_id, None)
         logger.info("[CANCEL] registered task_id=%s", task_id)
         return event
 
@@ -123,10 +125,12 @@ class Worker:
         if task_id:
             with self._cancellation_lock:
                 self._cancellation_events.pop(task_id, None)
+                self._cancellation_requested_at.pop(task_id, None)
             logger.info("[CANCEL] released task_id=%s", task_id)
 
     def cancel(self, task_id: str) -> bool:
         task_id = str(task_id or "").strip()
+        received_at = time.monotonic()
         logger.warning("[CANCEL] received task_id=%s", task_id or "<empty>")
         if not task_id:
             logger.warning("[CANCEL] rejected empty task_id")
@@ -136,8 +140,10 @@ class Worker:
             if event is None:
                 logger.warning("[CANCEL] event_found=False task_id=%s status=%s", task_id, self.status)
                 return False
+            self._cancellation_requested_at[task_id] = received_at
             event.set()
             logger.warning("[CANCEL] event_found=True event_set=True task_id=%s", task_id)
+            logger.info("[CANCEL] cancellation_requested_at task_id=%s monotonic=%s", task_id, received_at)
             return True
 
     def is_cancelled(self, task_id: str | None) -> bool:
@@ -146,6 +152,15 @@ class Worker:
         with self._cancellation_lock:
             event = self._cancellation_events.get(task_id)
             return bool(event and event.is_set())
+
+    def _cancel_elapsed_ms(self, task_id: str | None, now: float | None = None) -> float | None:
+        if not task_id:
+            return None
+        with self._cancellation_lock:
+            requested_at = self._cancellation_requested_at.get(task_id)
+        if requested_at is None:
+            return None
+        return ((now if now is not None else time.monotonic()) - requested_at) * 1000
 
     def execute(self, job: dict[str, Any]) -> dict[str, Any]:
         task_id = str(job.get("task_id") or "").strip() or None
@@ -197,7 +212,7 @@ class Worker:
             executor = AgentExecutor(service, workspace_root=workspace, max_steps=requested_steps)
             result = executor.execute(prompt)
             if cancellation_event is not None and cancellation_event.is_set():
-                logger.warning("Cancellation detected after executor returned task_id=%s elapsed_ms=%.1f", task_id, (time.monotonic() - execution_started) * 1000)
+                logger.warning("Cancellation detected after executor returned task_id=%s cancel_to_executor_return_ms=%.1f total_elapsed_ms=%.1f", task_id, self._cancel_elapsed_ms(task_id), (time.monotonic() - execution_started) * 1000)
                 raise AgentExecutionError("Task execution was cancelled.")
             if result.get("status") != "completed" or not result.get("execution_evidence", {}).get("verified", False):
                 raise AgentExecutionError("Agent execution completed without verified execution evidence.")
@@ -208,15 +223,19 @@ class Worker:
         except Exception as exc:
             self.last_error = str(exc)
             self._release_task_id(task_id)
-            logger.warning("Task execution exiting with error task_id=%s error_type=%s elapsed_ms=%.1f", task_id, type(exc).__name__, (time.monotonic() - execution_started) * 1000)
+            logger.warning("Task execution exiting with error task_id=%s error_type=%s cancel_to_error_ms=%.1f total_elapsed_ms=%.1f", task_id, type(exc).__name__, self._cancel_elapsed_ms(task_id) if self._cancel_elapsed_ms(task_id) is not None else -1.0, (time.monotonic() - execution_started) * 1000)
             raise
         finally:
-            logger.info("[CANCEL] execution cleanup begin task_id=%s cancelled=%s", task_id, bool(cancellation_event and cancellation_event.is_set()))
+            cleanup_started = time.monotonic()
+            cancelled = bool(cancellation_event and cancellation_event.is_set())
+            cancel_to_cleanup_ms = self._cancel_elapsed_ms(task_id, cleanup_started)
+            logger.info("[CANCEL] execution cleanup begin task_id=%s cancelled=%s cancel_to_cleanup_ms=%.1f", task_id, cancelled, cancel_to_cleanup_ms if cancel_to_cleanup_ms is not None else -1.0)
             self._release_cancellation(task_id)
             self.status = "idle"
             self.started_at = None
             self._execution_lock.release()
-            logger.info("[CANCEL] execution cleanup complete task_id=%s status=%s total_elapsed_ms=%.1f", task_id, self.status, (time.monotonic() - execution_started) * 1000)
+            cleanup_finished = time.monotonic()
+            logger.info("[CANCEL] execution cleanup complete task_id=%s status=%s cancel_to_cleanup_complete_ms=%.1f total_elapsed_ms=%.1f", task_id, self.status, ((cleanup_finished - (cleanup_started - (cancel_to_cleanup_ms / 1000 if cancel_to_cleanup_ms is not None else 0))) * 1000) if cancel_to_cleanup_ms is not None else -1.0, (cleanup_finished - execution_started) * 1000)
 
 
 worker = Worker("pc-worker-01")
