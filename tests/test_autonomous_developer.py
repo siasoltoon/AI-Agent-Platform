@@ -6,8 +6,8 @@ class FakeRuntime:
     def __init__(self):
         self.calls = []
 
-    def execute(self, prompt, task_id=None, metadata=None):
-        self.calls.append((task_id, metadata))
+    def execute(self, prompt, task_id=None, timeout_seconds=None, metadata=None):
+        self.calls.append((task_id, metadata, timeout_seconds))
         task_id_text = str(task_id or "")
         if ":verification:" in task_id_text:
             records = [{"tool": "terminal", "ok": True, "result": {"command": "pytest -q", "code": 0}}]
@@ -19,7 +19,7 @@ class FakeRuntime:
 def test_autonomous_developer_completes_dependency_ordered_mission():
     runtime = FakeRuntime()
     result = AutonomousDeveloper(runtime).run("m1", "build a bot")
-    assert result["status"] == "completed"
+    assert result["status"] == "completed", result
     assert result["verified"] is True
     assert [call[0].split(":")[1] for call in runtime.calls] == [
         "recon", "architecture", "implementation", "integration", "verification", "hardening", "acceptance"
@@ -28,8 +28,8 @@ def test_autonomous_developer_completes_dependency_ordered_mission():
 
 def test_autonomous_developer_retries_and_blocks_after_verification_failure():
     class BadRuntime(FakeRuntime):
-        def execute(self, prompt, task_id=None, metadata=None):
-            self.calls.append((task_id, metadata))
+        def execute(self, prompt, task_id=None, timeout_seconds=None, metadata=None):
+            self.calls.append((task_id, metadata, timeout_seconds))
             return {"result": {"result": {"status": "completed", "execution_evidence": {"verified": False}, "tool_records": []}}}
 
     result = AutonomousDeveloper(BadRuntime()).run("m2", "build a bot", max_retries=2)
@@ -49,7 +49,7 @@ def test_autonomous_developer_resumes_completed_steps_without_repeating_them():
     store.save(memory)
 
     result = AutonomousDeveloper(runtime, memory_store=store).run("m3", "build a bot")
-    assert result["status"] == "completed"
+    assert result["status"] == "completed", result
     assert [call[0].split(":")[1] for call in runtime.calls] == [
         "integration", "verification", "hardening", "acceptance"
     ]
@@ -76,13 +76,13 @@ def test_cancellation_requested_during_execution_is_honored():
     developer = None
 
     class CancellingRuntime(FakeRuntime):
-        def execute(self, prompt, task_id=None, metadata=None):
-            self.calls.append((task_id, metadata))
+        def execute(self, prompt, task_id=None, timeout_seconds=None, metadata=None):
+            self.calls.append((task_id, metadata, timeout_seconds))
             developer.cancel("m5")
             return {"result": {"result": {"status": "completed", "execution_evidence": {"verified": True}, "tool_records": [{"tool": "read_file", "ok": True}]}}}
 
     developer = AutonomousDeveloper(CancellingRuntime(), memory_store=store)
     result = developer.run("m5", "cancel during execution")
-    assert result["status"] == "cancelled"
+    assert result["status"] == "cancelled", result
     assert result["cancelled"] is True
     assert store.load("m5").status == "cancelled"
