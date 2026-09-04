@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 import requests
 
 logger = logging.getLogger("ai_agent_backend.worker_client")
+
+# The execution timeout is the worker/agent budget. HTTP transport needs a
+# small grace window so the worker can finish its final cleanup/response after
+# the execution budget is exhausted without the controller racing it to a
+# requests.Timeout and issuing a duplicate/cancellation path.
+WORKER_HTTP_TIMEOUT_MARGIN_SECONDS = max(
+    5.0, float(os.getenv("WORKER_HTTP_TIMEOUT_MARGIN_SECONDS", "30"))
+)
 
 
 class WorkerExecutionError(RuntimeError):
@@ -29,6 +38,11 @@ class WorkerClient:
     def _task_id(task: dict[str, Any]) -> str | None:
         value = task.get("task_id")
         return str(value).strip() or None if value is not None else None
+
+    @staticmethod
+    def _http_timeout(execution_timeout: int) -> float:
+        """Return a transport timeout that does not consume execution budget."""
+        return float(execution_timeout) + WORKER_HTTP_TIMEOUT_MARGIN_SECONDS
 
     @classmethod
     def _raise_for_worker_error(cls, response: requests.Response, task_id: str | None = None) -> None:
@@ -102,13 +116,24 @@ class WorkerClient:
         """Execute one worker request without unsafe blind retries."""
         effective_timeout = timeout or int(task.get("timeout", 300))
         task_id = self._task_id(task)
+        http_timeout = self._http_timeout(effective_timeout)
+        logger.info(
+            "Worker execute request task_id=%s execution_timeout=%s http_timeout=%s margin=%s",
+            task_id,
+            effective_timeout,
+            http_timeout,
+            WORKER_HTTP_TIMEOUT_MARGIN_SECONDS,
+        )
         try:
-            response = requests.post(f"{self.base_url}/execute", json=task, timeout=effective_timeout)
+            response = requests.post(f"{self.base_url}/execute", json=task, timeout=http_timeout)
         except requests.Timeout as exc:
             if task_id:
                 self.cancel_task(task_id)
             raise WorkerExecutionError(
-                f"Worker request timed out after {effective_timeout} seconds.", retryable=True, ambiguous=True, task_id=task_id
+                f"Worker request timed out after {http_timeout:g} seconds while execution budget was {effective_timeout} seconds.",
+                retryable=True,
+                ambiguous=True,
+                task_id=task_id,
             ) from exc
         except requests.RequestException as exc:
             if task_id:
