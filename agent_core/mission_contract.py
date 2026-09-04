@@ -29,8 +29,13 @@ class MissionContract:
             raise ValueError("Mission objective cannot be empty")
         lower = text.lower()
 
+        # A scoped implementation such as "Create X. Do not modify any other
+        # files." is not read-only. The "other" qualifier is intentionally
+        # excluded here, matching the runtime mission-policy semantics.
         read_only = bool(re.search(
-            r"\bread[- ]only\b|\bdo not (?:modify|change|write|delete|create)\b|"
+            r"\bread[- ]only\b|"
+            r"\bdo not (?:modify|change|write|delete|create)\b(?![^.\n]*\bother\b)|"
+            r"\bdon['’]t (?:modify|change|write|delete|create)\b(?![^.\n]*\bother\b)|"
             r"\bwithout making changes\b|\bmake no changes\b|\binspect(?:ion)? only\b|"
             r"\bdo not alter (?:the )?(?:workspace|repository|files?)\b",
             lower,
