@@ -13,12 +13,18 @@ class SafeTaskRunner(TaskRunner):
 
     @staticmethod
     def _is_ambiguous_worker_error(error: str) -> bool:
-        text = str(error or "").lower()
-        if text.startswith("worker request timed out"):
-            return True
-        if text.startswith("worker request failed:"):
-            return True
-        if text.startswith("worker http 5"):
+        text = str(error or "").lower().strip()
+        ambiguous_prefixes = (
+            "worker request timed out",
+            "worker request failed:",
+            "worker request cancelled:",
+            "worker http 408:",
+            "worker http 429:",
+            "worker http 5",
+            "worker returned a non-json response.",
+            "worker returned an invalid json response object.",
+        )
+        if text.startswith(ambiguous_prefixes):
             return True
         if "already in progress; duplicate execution rejected" in text:
             return True
