@@ -15,6 +15,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from agent_core.execution_agent import AgentExecutionError
+from agent_core.network_capability import NetworkCapability, NetworkCapabilityError
 from agent_core.network_policy import NetworkPolicy
 from agent_core.reliable_executor import ReliableAgentExecutor
 from agent_core.worker_isolation import WorkerIsolationError, WorkerIsolationPolicy
@@ -180,10 +181,18 @@ class Worker:
             if requested_steps < 1 or requested_steps > maximum_steps: raise ValueError(f"max_agent_steps must be between 1 and {maximum_steps} for the {execution_profile} execution profile.")
             contract = metadata.get("mission_contract")
             contract_network_access = contract.get("network_access") if isinstance(contract, dict) else None
-            network_access = str(metadata.get("network_access", contract_network_access or "restricted")).strip().lower()
-            if network_access not in {"deny", "restricted", "allow"}: raise ValueError("network_access must be one of 'deny', 'restricted', or 'allow'.")
+            contract_capability = NetworkCapability.from_contract(contract_network_access)
+            requested_network_access = metadata.get("network_access")
+            network_capability = contract_capability.authorize(requested_network_access)
+            network_access = network_capability.mode
             network_policy = NetworkPolicy(mode=network_access)
-            logger.info("Executing task_id=%s model=%s prompt_length=%s timeout=%s mode=agentic-reliable profile=%s max_agent_steps=%s workspace=%s isolation_root=%s network_access=%s self_repair_attempts=%s", task_id, model, len(prompt), timeout, execution_profile, requested_steps, workspace, self.isolation_policy.root, network_access, ReliableAgentExecutor.MAX_ATTEMPTS)
+            capability_evidence = {
+                **contract_capability.snapshot(),
+                "requested_mode": requested_network_access or contract_capability.mode,
+                "authorized_mode": network_access,
+                "escalation_blocked": True,
+            }
+            logger.info("Executing task_id=%s model=%s prompt_length=%s timeout=%s mode=agentic-reliable profile=%s max_agent_steps=%s workspace=%s isolation_root=%s network_access=%s network_contract=%s self_repair_attempts=%s", task_id, model, len(prompt), timeout, execution_profile, requested_steps, workspace, self.isolation_policy.root, network_access, contract_capability.mode, ReliableAgentExecutor.MAX_ATTEMPTS)
             service = OllamaService(base_url=OLLAMA_HOST, model=model, timeout=timeout, cancel_event=cancellation_event, use_isolated_cancellation_process=True)
             executor_kwargs = {"workspace_root": str(workspace), "max_steps": requested_steps}
             if "network_policy" in inspect.signature(AgentExecutor).parameters:
@@ -192,8 +201,9 @@ class Worker:
             result = executor.execute(prompt)
             if cancellation_event is not None and cancellation_event.is_set(): raise AgentExecutionError("Task execution was cancelled.")
             if result.get("status") != "completed" or not result.get("execution_evidence", {}).get("verified", False): raise AgentExecutionError("Agent execution completed without verified execution evidence.")
+            result.setdefault("network_capability", capability_evidence)
             self.last_completed_at = time.time()
-            response = {"status": "completed", "worker_id": self.worker_id, "task_id": task_id, "model": model, "execution_profile": execution_profile, "max_agent_steps": requested_steps, "workspace": str(workspace), "isolation": self.isolation_policy.snapshot(), "network_policy": network_policy.snapshot(), "result": result, "resource_snapshot": resource_snapshot(), "idempotency": {"key": task_id, "replayed": False}}
+            response = {"status": "completed", "worker_id": self.worker_id, "task_id": task_id, "model": model, "execution_profile": execution_profile, "max_agent_steps": requested_steps, "workspace": str(workspace), "isolation": self.isolation_policy.snapshot(), "network_policy": network_policy.snapshot(), "network_capability": capability_evidence, "result": result, "resource_snapshot": resource_snapshot(), "idempotency": {"key": task_id, "replayed": False}}
             self._store_result(task_id, response); return response
         except Exception as exc:
             self.last_error = str(exc); self._release_task_id(task_id)
@@ -219,9 +229,9 @@ def health() -> dict[str, Any]:
 @app.post("/execute")
 def execute(request: ExecuteRequest) -> dict[str, Any]:
     try: return worker.execute(request.model_dump())
-    except WorkerIsolationError as exc:
-        logger.error("Worker isolation rejected task: %s", exc)
-        raise HTTPException(status_code=403, detail={"message": "Worker isolation policy rejected the requested workspace.", "error_type": type(exc).__name__, "error": str(exc), "task_id": request.task_id}) from exc
+    except (WorkerIsolationError, NetworkCapabilityError) as exc:
+        logger.error("Worker security policy rejected task: %s", exc)
+        raise HTTPException(status_code=403, detail={"message": "Worker security policy rejected the requested execution capability.", "error_type": type(exc).__name__, "error": str(exc), "task_id": request.task_id}) from exc
     except (AgentExecutionError, ValueError, RuntimeError) as exc:
         logger.error("Agent execution failed: %s: %s", type(exc).__name__, exc)
         raise HTTPException(status_code=422, detail={"message": "Agent could not complete the task.", "error": str(exc), "task_id": request.task_id}) from exc
