@@ -27,9 +27,9 @@ def _safe_workers() -> dict[str, Any]:
 def _safe_execution_state() -> dict[str, Any]:
     path = getattr(tasks.TASK_STORE, "path", "data/tasks.db")
     try:
-        ledger = ExecutionLedger(path); effects = SideEffectLedger(path)
-        current = ledger.current if hasattr(ledger, "current") else None
-        return {"status": "ok", "side_effects": effects.summary(limit=20)}
+        ledger = ExecutionLedger(path)
+        effects = SideEffectLedger(path)
+        return {"status": "ok", "attempts": ledger.summary(limit=20), "side_effects": effects.summary(limit=20)}
     except Exception as exc:
         return {"status": "offline", "error": str(exc)}
 
