@@ -1,5 +1,5 @@
 from agent_core.checkpointed_runtime import CheckpointedRuntime
-from agent_core.mission_memory import MissionMemoryStore
+from agent_core.mission_memory import MissionMemory, MissionMemoryStore
 from agent_core.mission_orchestrator import MissionOrchestrator, MissionPhase
 
 
@@ -28,6 +28,14 @@ class FakeDeveloper:
     def cancel(self, mission_id):
         self.calls.append(("cancel", mission_id))
         return {"mission_id": mission_id, "status": "cancelled"}
+
+
+class CheckpointingFakeDeveloper(FakeDeveloper):
+    def run(self, mission_id, objective, max_retries=3, **kwargs):
+        memory = MissionMemory(mission_id, objective, status="running")
+        memory.begin_execution("acceptance", f"{mission_id}:acceptance:1")
+        self.memory_store.save(memory)
+        return super().run(mission_id, objective, max_retries, **kwargs)
 
 
 def test_orchestrator_emits_contract_and_terminal_lifecycle():
@@ -69,6 +77,20 @@ def test_orchestrator_propagates_execution_controls_without_mutating_developer()
     assert kwargs["timeout_seconds"] == 123
     assert kwargs["metadata"]["network_access"] == "restricted"
     assert developer.runtime.__class__ is FakeRuntime
+
+
+def test_orchestrator_finalizes_active_execution_after_completion():
+    developer = CheckpointingFakeDeveloper()
+    orchestrator = MissionOrchestrator(developer)
+
+    result = orchestrator.run("m-final", "Implement a feature")
+
+    assert result["status"] == "completed"
+    memory = developer.memory_store.load("m-final")
+    assert memory is not None
+    assert memory.active_task == ""
+    assert memory.active_execution_id == ""
+    assert memory.checkpoints[-1]["summary"] == "terminal mission state finalized: completed"
 
 
 def test_orchestrator_cancel_delegates_and_emits_terminal_event():
