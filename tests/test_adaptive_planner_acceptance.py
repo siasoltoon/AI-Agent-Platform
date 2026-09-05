@@ -79,3 +79,28 @@ def test_implementation_acceptance_requires_test_evidence():
     )
     assert not result.accepted
     assert "tests_checked" in result.reasons
+
+
+def test_acceptance_exposes_network_capability_as_explicit_gate():
+    gate = MissionAcceptanceGate()
+    result = gate.evaluate(
+        mission_status="completed",
+        plan_complete=True,
+        tests_checked=True,
+        final_reviewed=True,
+        execution_result={
+            "mission_objective": "Implement a feature",
+            "status": "completed",
+            "execution_evidence": {"verified": True},
+            "tool_records": [{"tool": "read_file", "ok": True}],
+            "mission_contract": {"network_access": "restricted"},
+            "network_capability": {
+                "contract_mode": "restricted",
+                "authorized_mode": "allow",
+                "escalation_blocked": True,
+            },
+        },
+    )
+    assert not result.accepted
+    assert "network_capability_compliant" in result.reasons
+    assert result.verification.checks["network_capability_compliant"] is False
