@@ -34,6 +34,7 @@ This document defines the engineering direction for heavy autonomous software mi
 - Lifecycle events are durably ordered in mission memory, allowing audit, diagnostics, and resume tooling to reconstruct the orchestrator's phase history.
 - Event persistence occurs before an external event sink is notified, so observability consumers cannot become the source of truth or prevent durable history from being recorded.
 - Operational inspection is read-only and bounded: callers can retrieve a mission snapshot and a limited suffix of its event history without mutating mission state.
+- Cancellation from the Task API must traverse the professional MissionService for `mission.execute` tasks so mission memory reaches a durable terminal state and records the cancellation event; worker cancellation remains the final execution-layer signal.
 - The platform should prefer deterministic gates for safety-critical decisions and use the model for planning, implementation, diagnosis, and adaptation.
 
 ## Current architecture
