@@ -1,8 +1,8 @@
 """Process-level controls for terminal tool execution.
 
-This module provides process-group isolation, bounded resources, and bounded
-streaming output capture. It is still not an OS sandbox; callers must provide a
-workspace boundary and treat the runner as a resource-control layer.
+This module provides process-group isolation, bounded resources, bounded streaming
+output capture, and native host containment where available. It is still not a
+complete filesystem or network sandbox.
 """
 
 from __future__ import annotations
@@ -13,6 +13,8 @@ import subprocess
 import threading
 from dataclasses import dataclass
 from typing import Mapping, Sequence
+
+from agent_core.os_isolation import WindowsJobIsolation, native_isolation_mode
 
 
 @dataclass(frozen=True)
@@ -37,6 +39,10 @@ class IsolatedProcessRunner:
 
     def __init__(self, *, environment: Mapping[str, str]) -> None:
         self.environment = dict(environment)
+
+    @staticmethod
+    def isolation_mode() -> str:
+        return native_isolation_mode()
 
     @staticmethod
     def _creationflags() -> int:
@@ -66,7 +72,12 @@ class IsolatedProcessRunner:
         return apply_limits
 
     @staticmethod
-    def _kill_process_tree(process: subprocess.Popen[str]) -> None:
+    def _kill_process_tree(process: subprocess.Popen[str], job: WindowsJobIsolation | None = None) -> None:
+        if job is not None:
+            try:
+                job.terminate()
+            except OSError:
+                pass
         if process.poll() is not None:
             return
         if os.name != "nt":
@@ -116,6 +127,17 @@ class IsolatedProcessRunner:
             start_new_session=self._start_new_session(),
             preexec_fn=self._resource_preexec(limits),
         )
+        job: WindowsJobIsolation | None = None
+        if os.name == "nt":
+            job = WindowsJobIsolation(
+                memory_limit_bytes=limits.max_memory_bytes,
+                process_limit=limits.max_processes,
+            )
+            try:
+                job.attach(process)
+            except Exception:
+                self._kill_process_tree(process)
+                raise
 
         stdout_chunks: list[str] = []
         stderr_chunks: list[str] = []
@@ -143,11 +165,13 @@ class IsolatedProcessRunner:
             process.wait(timeout=limits.timeout_seconds)
         except subprocess.TimeoutExpired:
             timed_out = True
-            self._kill_process_tree(process)
+            self._kill_process_tree(process, job)
             process.wait()
         finally:
             for reader in readers:
                 reader.join(timeout=2)
+            if job is not None:
+                job.close()
 
         stdout = "".join(stdout_chunks)
         stderr = "".join(stderr_chunks)
