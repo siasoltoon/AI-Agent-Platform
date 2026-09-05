@@ -7,7 +7,9 @@ from typing import Any
 from agent_core.autonomous_developer import AutonomousDeveloper
 from agent_core.mission_memory import MissionMemory, MissionMemoryStore
 from agent_core.mission_orchestrator import MissionOrchestrator
+from agent_core.mission_reconciliation import MissionReconciler
 from agent_core.runtime import AgentRuntime
+from backend.storage.task_store import TaskStore
 
 
 class MissionService:
@@ -18,10 +20,12 @@ class MissionService:
         runtime: AgentRuntime | None = None,
         event_sink=None,
         memory_store: MissionMemoryStore | None = None,
+        task_store: TaskStore | None = None,
     ) -> None:
         self.runtime = runtime or AgentRuntime()
         self.developer = AutonomousDeveloper(self.runtime, memory_store=memory_store)
         self.orchestrator = MissionOrchestrator(self.developer, event_sink=event_sink)
+        self.reconciler = MissionReconciler(task_store, self.developer.memory_store) if task_store is not None else None
 
     def execute(
         self,
@@ -65,6 +69,18 @@ class MissionService:
         snapshot["event_count"] = len(memory.events)
         snapshot["events_truncated"] = len(memory.events) > event_limit
         return snapshot
+
+    def reconcile(self, task_id: str) -> dict[str, Any]:
+        """Reconcile one professional task with its durable mission without blind replay."""
+        if self.reconciler is None:
+            raise RuntimeError("Mission reconciliation requires a TaskStore")
+        return self.reconciler.reconcile(task_id).snapshot()
+
+    def reconcile_many(self, *, limit: int = 100, status: str | None = None) -> list[dict[str, Any]]:
+        """Reconcile a bounded task slice for operational recovery sweeps."""
+        if self.reconciler is None:
+            raise RuntimeError("Mission reconciliation requires a TaskStore")
+        return self.reconciler.reconcile_many(limit=limit, status=status)
 
     def cancel(self, task_id: str, *, objective: str | None = None) -> dict[str, Any]:
         """Cancel a mission and persist its terminal event even if execution never started."""
