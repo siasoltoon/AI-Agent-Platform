@@ -11,6 +11,7 @@ on:
       - feature/pro-agent-foundation
       - feature/mission-orchestrator-v1
       - feature/worker-lease-recovery-v1
+      - feature/execution-ledger-fencing-v1
   pull_request:
     branches:
       - main
