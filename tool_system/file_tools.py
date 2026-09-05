@@ -49,6 +49,10 @@ class _WorkspaceFileTool(BaseTool):
         if self.execution_fence is not None and key is not None:
             self.execution_fence.side_effects.transition(key, "failed", error=error)
 
+    def _assert_current(self) -> None:
+        if self.execution_fence is not None:
+            self.execution_fence.assert_current()
+
 
 class ReadFileTool(_WorkspaceFileTool):
     name = "read_file"
@@ -69,14 +73,18 @@ class WriteFileTool(_WorkspaceFileTool):
         replay = self._replay(key)
         if replay is not None:
             return replay
+        self._assert_current()
+        mutation_started = False
         try:
-            if self.execution_fence:
-                self.execution_fence.assert_current()
+            mutation_started = True
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(str(content), encoding="utf-8")
             return self._commit(key, {"ok": True, "path": str(target), "bytes": target.stat().st_size, "content": str(content)})
         except Exception as exc:
-            self._ambiguous(key, str(exc))
+            if mutation_started:
+                self._ambiguous(key, str(exc))
+            else:
+                self._failed(key, str(exc))
             raise
 
 
@@ -125,16 +133,21 @@ class CopyFileTool(_WorkspaceFileTool):
         replay = self._replay(key)
         if replay is not None:
             return replay
+        self._assert_current()
+        if not src.is_file():
+            self._failed(key, f"Source file does not exist: {src}")
+            raise FileNotFoundError(f"Source file does not exist: {src}")
+        mutation_started = False
         try:
-            if self.execution_fence:
-                self.execution_fence.assert_current()
-            if not src.is_file():
-                raise FileNotFoundError(f"Source file does not exist: {src}")
+            mutation_started = True
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
             return self._commit(key, {"ok": True, "source": str(src), "destination": str(dst), "bytes": dst.stat().st_size})
         except Exception as exc:
-            self._ambiguous(key, str(exc))
+            if mutation_started:
+                self._ambiguous(key, str(exc))
+            else:
+                self._failed(key, str(exc))
             raise
 
 
@@ -147,16 +160,21 @@ class MoveFileTool(_WorkspaceFileTool):
         replay = self._replay(key)
         if replay is not None:
             return replay
+        self._assert_current()
+        if not src.exists():
+            self._failed(key, f"Source does not exist: {src}")
+            raise FileNotFoundError(f"Source does not exist: {src}")
+        mutation_started = False
         try:
-            if self.execution_fence:
-                self.execution_fence.assert_current()
-            if not src.exists():
-                raise FileNotFoundError(f"Source does not exist: {src}")
+            mutation_started = True
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(src), str(dst))
             return self._commit(key, {"ok": True, "source": str(src), "destination": str(dst)})
         except Exception as exc:
-            self._ambiguous(key, str(exc))
+            if mutation_started:
+                self._ambiguous(key, str(exc))
+            else:
+                self._failed(key, str(exc))
             raise
 
 
@@ -169,15 +187,20 @@ class DeleteFileTool(_WorkspaceFileTool):
         replay = self._replay(key)
         if replay is not None:
             return replay
+        self._assert_current()
+        if not target.is_file():
+            self._failed(key, f"File does not exist: {target}")
+            raise FileNotFoundError(f"File does not exist: {target}")
+        mutation_started = False
         try:
-            if self.execution_fence:
-                self.execution_fence.assert_current()
-            if not target.is_file():
-                raise FileNotFoundError(f"File does not exist: {target}")
+            mutation_started = True
             target.unlink()
             return self._commit(key, {"ok": True, "path": str(target), "exists": target.exists()})
         except Exception as exc:
-            self._ambiguous(key, str(exc))
+            if mutation_started:
+                self._ambiguous(key, str(exc))
+            else:
+                self._failed(key, str(exc))
             raise
 
 
@@ -190,13 +213,17 @@ class MakeDirectoryTool(_WorkspaceFileTool):
         replay = self._replay(key)
         if replay is not None:
             return replay
+        self._assert_current()
+        mutation_started = False
         try:
-            if self.execution_fence:
-                self.execution_fence.assert_current()
+            mutation_started = True
             target.mkdir(parents=True, exist_ok=True)
             return self._commit(key, {"ok": True, "path": str(target), "exists": target.is_dir()})
         except Exception as exc:
-            self._ambiguous(key, str(exc))
+            if mutation_started:
+                self._ambiguous(key, str(exc))
+            else:
+                self._failed(key, str(exc))
             raise
 
 
