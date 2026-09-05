@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -35,7 +36,6 @@ class MissionReconciler:
     """Converge task and mission state without treating unverified work as success."""
 
     PROFESSIONAL_COMMAND = "mission.execute"
-    TERMINAL_TASKS = {"completed", "failed", "cancelled"}
 
     def __init__(self, task_store: TaskStore, memory_store: MissionMemoryStore) -> None:
         self.task_store = task_store
@@ -50,7 +50,8 @@ class MissionReconciler:
             memory.status == "completed"
             and execution.get("verified") is True
             and acceptance.get("accepted") is True
-            and bool(evidence.get("evidence_count", execution.get("execution_evidence") is not None))
+            and isinstance(evidence, dict)
+            and bool(evidence)
         )
 
     @staticmethod
@@ -86,7 +87,13 @@ class MissionReconciler:
 
         if mission_status == "completed" and self._is_verified_success(memory) and task_status != "completed":
             execution = dict(memory.last_execution)
-            updated = self.task_store.update(task_id, status="completed", result=execution, error=None, completed_at=None)
+            updated = self.task_store.update(
+                task_id,
+                status="completed",
+                result=execution,
+                error=None,
+                completed_at=time.time(),
+            )
             return ReconciliationResult(task_id, "task_completed_from_verified_mission", updated["status"], mission_status, True, True, "durable mission has independently verified acceptance")
 
         if mission_status == "cancelled":
@@ -106,7 +113,7 @@ class MissionReconciler:
             return ReconciliationResult(task_id, "task_blocked_for_recovery", updated["status"], mission_status, False, True, "unverified mission state cannot be replayed automatically")
 
         if mission_status == "running" and task_status == "queued":
-            updated = self.task_store.update(task_id, status="running")
+            updated = self.task_store.update(task_id, status="running", started_at=time.time())
             return ReconciliationResult(task_id, "task_resumed_to_running", updated["status"], mission_status, True, True, "durable mission is actively running")
 
         if mission_status == "pending" and task_status == "running":
@@ -125,15 +132,8 @@ class MissionReconciler:
             self.memory_store.save(memory)
             return ReconciliationResult(task_id, "mission_cancelled_from_task", task_status, "cancelled", True, True, "durable mission cancellation follows terminal task cancellation")
 
-        if task_status == "failed" and mission_status == "failed":
-            return ReconciliationResult(task_id, "converged_failed", task_status, mission_status, True, True, "both stores contain failed terminal state")
-
         return ReconciliationResult(task_id, "no_safe_convergence", task_status, mission_status, False, True, "state mismatch requires explicit recovery policy")
 
     def reconcile_many(self, *, limit: int = 100, status: str | None = None) -> list[dict[str, Any]]:
         limit = max(1, min(int(limit), 500))
-        tasks = self.task_store.list(limit=limit, status=status)
-        results = []
-        for task in tasks:
-            results.append(self.reconcile(task["id"]).snapshot())
-        return results
+        return [self.reconcile(task["id"]).snapshot() for task in self.task_store.list(limit=limit, status=status)]
