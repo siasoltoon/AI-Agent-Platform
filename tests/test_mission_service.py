@@ -61,3 +61,16 @@ def test_mission_service_inspect_rejects_invalid_event_limit():
             assert "event_limit" in str(exc)
         else:
             raise AssertionError("invalid event_limit should fail")
+
+
+def test_mission_service_cancel_persists_memory_when_task_has_not_started():
+    service = MissionService(runtime=FakeRuntime())
+
+    result = service.cancel("queued-mission", objective="Implement a feature")
+
+    assert result["status"] == "cancelled"
+    memory = service.developer.memory_store.load("queued-mission")
+    assert memory is not None
+    assert memory.status == "cancelled"
+    assert memory.events[-1]["phase"] == "cancelled"
+    assert memory.events[-1]["status"] == "cancelled"
