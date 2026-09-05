@@ -63,6 +63,22 @@ def _record_is_security_violation(record: Any) -> bool:
 _NETWORK_RANK = {"deny": 0, "restricted": 1, "native": 2, "allow": 3}
 
 
+def _network_isolation(result: dict[str, Any], evidence: dict[str, Any]) -> dict[str, Any] | None:
+    direct = result.get("network_isolation")
+    if isinstance(direct, dict):
+        return direct
+    embedded = evidence.get("network_isolation")
+    if isinstance(embedded, dict):
+        return embedded
+    for record in result.get("tool_records", []) if isinstance(result.get("tool_records"), list) else []:
+        if not isinstance(record, dict) or str(record.get("tool", "")).lower() != "terminal":
+            continue
+        payload = record.get("result")
+        if isinstance(payload, dict) and isinstance(payload.get("network_isolation"), dict):
+            return payload["network_isolation"]
+    return None
+
+
 def _network_capability_compliant(result: dict[str, Any], evidence: dict[str, Any]) -> bool:
     contract = result.get("mission_contract")
     if not isinstance(contract, dict) or "network_access" not in contract:
@@ -82,9 +98,7 @@ def _network_capability_compliant(result: dict[str, Any], evidence: dict[str, An
     if _NETWORK_RANK[authorized] > _NETWORK_RANK[expected]:
         return False
     if expected == "native":
-        isolation = result.get("network_isolation")
-        if not isinstance(isolation, dict):
-            isolation = evidence.get("network_isolation") if isinstance(evidence.get("network_isolation"), dict) else None
+        isolation = _network_isolation(result, evidence)
         if not isinstance(isolation, dict) or isolation.get("enforced") is not True:
             return False
     return True
