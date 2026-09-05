@@ -73,7 +73,7 @@ class TerminalTool(BaseTool):
     @classmethod
     def _contains_blocked_command(cls, command: str) -> bool:
         try:
-            tokens = __import__("shlex").split(command, posix=True)
+            tokens = shlex.split(command, posix=True)
         except ValueError:
             return True
         return any(token.lower() in cls._BLOCKED_COMMANDS for token in tokens)
@@ -81,7 +81,7 @@ class TerminalTool(BaseTool):
     @classmethod
     def _safe_environment(cls) -> dict[str, str]:
         """Pass only non-secret process configuration needed by developer toolchains."""
-        return {key: value for key, value in __import__("os").environ.items() if key.upper() in cls._SAFE_ENV_KEYS}
+        return {key: value for key, value in os.environ.items() if key.upper() in cls._SAFE_ENV_KEYS}
 
     def _safe_path(self, path: str | Path) -> Path:
         return self._boundary.assert_safe(path)
