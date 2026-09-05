@@ -41,7 +41,18 @@ class TerminalTool(BaseTool):
         self.workspace = Path(workspace_root or Path.cwd()).resolve()
         self._boundary = WorkspaceBoundary(self.workspace)
         self.network_policy = network_policy or NetworkPolicy()
-        self._runner = IsolatedProcessRunner(environment=self._safe_environment())
+        self._runner = IsolatedProcessRunner(
+            environment=self._safe_environment(),
+            network_sandbox=self._network_sandbox(),
+        )
+
+    def _network_sandbox(self):
+        from agent_core.network_sandbox import NetworkSandbox
+        if self.network_policy.mode == "native":
+            return NetworkSandbox("native")
+        if self.network_policy.mode == "deny":
+            return NetworkSandbox("command-policy")
+        return NetworkSandbox("command-policy")
 
     @staticmethod
     def _truncate(value: str) -> str:
@@ -82,7 +93,6 @@ class TerminalTool(BaseTool):
 
     @classmethod
     def _safe_environment(cls) -> dict[str, str]:
-        """Pass only non-secret process configuration needed by developer toolchains."""
         return {key: value for key, value in os.environ.items() if key.upper() in cls._SAFE_ENV_KEYS}
 
     def _safe_path(self, path: str | Path) -> Path:
@@ -110,13 +120,13 @@ class TerminalTool(BaseTool):
         if executable == "type":
             target = tokens[1] if len(tokens) > 1 else ""
             if not target or target.upper() == "NUL":
-                return {"stdout": "", "stderr": "", "code": 0, "timed_out": False, "network_policy": network_evidence}
+                return {"stdout": "", "stderr": "", "code": 0, "timed_out": False, "network_policy": network_evidence, "network_isolation": self._runner.network_isolation()}
             path = self._safe_path(target)
             try:
                 if path.is_file():
-                    return {"stdout": self._truncate(path.read_text(encoding="utf-8")), "stderr": "", "code": 0, "timed_out": False, "network_policy": network_evidence}
+                    return {"stdout": self._truncate(path.read_text(encoding="utf-8")), "stderr": "", "code": 0, "timed_out": False, "network_policy": network_evidence, "network_isolation": self._runner.network_isolation()}
             except OSError as exc:
-                return {"stdout": "", "stderr": str(exc), "code": 1, "timed_out": False, "network_policy": network_evidence}
+                return {"stdout": "", "stderr": str(exc), "code": 1, "timed_out": False, "network_policy": network_evidence, "network_isolation": self._runner.network_isolation()}
 
         if executable == "mkdir":
             targets = [part for part in tokens[1:] if part not in {"-p", "--parents"}]
@@ -124,7 +134,7 @@ class TerminalTool(BaseTool):
                 raise ValueError("mkdir requires a directory path.")
             for target in targets:
                 self._safe_path(target).mkdir(parents=True, exist_ok=True)
-            return {"stdout": "", "stderr": "", "code": 0, "timed_out": False, "network_policy": network_evidence}
+            return {"stdout": "", "stderr": "", "code": 0, "timed_out": False, "network_policy": network_evidence, "network_isolation": self._runner.network_isolation()}
 
         result_stdout, result_stderr, returncode, timed_out = self._runner.run(
             tokens,
@@ -141,5 +151,6 @@ class TerminalTool(BaseTool):
             "native_os_isolation": self._runner.isolation_mode(),
             "environment_policy": "allowlist",
             "network_policy": network_evidence,
+            "network_isolation": self._runner.network_isolation(),
             "shell": False,
         }
