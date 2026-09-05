@@ -42,6 +42,51 @@ def test_stale_execution_cannot_commit_after_newer_fence(tmp_path):
     assert ledger.commit_if_current("task-chaos", "exec-b", second["fencing_token"], result={"winner": "b"}) is True
 
 
+def test_committed_replay_restores_only_when_attempt_is_still_current(tmp_path):
+    db = tmp_path / "tasks.db"
+    store = TaskStore(db)
+    seed_running_task(store)
+    ledger = ExecutionLedger(db)
+
+    first = ledger.begin("task-chaos", "worker-a", execution_id="exec-a")
+    assert ledger.commit_if_current("task-chaos", "exec-a", first["fencing_token"], result={"winner": "a"}) is True
+    second = ledger.begin("task-chaos", "worker-b", execution_id="exec-b")
+
+    restored = ledger.restore_committed_task_if_current(
+        "task-chaos",
+        "exec-a",
+        first["fencing_token"],
+        result={"winner": "a"},
+        metadata={"execution_id": "exec-a", "fencing_token": first["fencing_token"], "idempotent_replay": True},
+    )
+
+    assert restored is False
+    assert second["fencing_token"] > first["fencing_token"]
+    assert store.get("task-chaos")["status"] == TaskStatus.RUNNING.value
+
+
+def test_committed_replay_can_restore_same_current_attempt_atomically(tmp_path):
+    db = tmp_path / "tasks.db"
+    store = TaskStore(db)
+    seed_running_task(store)
+    ledger = ExecutionLedger(db)
+
+    attempt = ledger.begin("task-chaos", "worker-a", execution_id="exec-a")
+    assert ledger.commit_if_current("task-chaos", "exec-a", attempt["fencing_token"], result={"answer": 42}) is True
+
+    restored = ledger.restore_committed_task_if_current(
+        "task-chaos",
+        "exec-a",
+        attempt["fencing_token"],
+        result={"answer": 42},
+        metadata={"execution_id": "exec-a", "fencing_token": attempt["fencing_token"], "idempotent_replay": True},
+    )
+
+    assert restored is True
+    assert store.get("task-chaos")["status"] == TaskStatus.COMPLETED.value
+    assert store.get("task-chaos")["result"] == {"answer": 42}
+
+
 def test_ambiguous_side_effect_is_never_replayed(tmp_path):
     db = tmp_path / "tasks.db"
     store = TaskStore(db)
