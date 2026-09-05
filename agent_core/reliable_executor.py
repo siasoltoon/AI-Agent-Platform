@@ -10,8 +10,13 @@ from typing import Any
 
 from agent_core.execution_agent import AgentExecutionError, AgentExecutor
 from agent_core.execution_evidence import ExecutionBudget, enrich_execution_evidence
+from agent_core.execution_fence import ExecutionFence
 from agent_core.network_policy import NetworkPolicy
 from backend.services.ollama_service import OllamaService
+from tool_system.file_tools import (
+    CopyFileTool, DeleteFileTool, MakeDirectoryTool, MoveFileTool, WriteFileTool,
+)
+from tool_system.terminal_tools import TerminalTool
 
 logger = logging.getLogger("ai_agent_reliable_executor")
 
@@ -21,7 +26,7 @@ class ReliableAgentExecutor:
     MAX_ATTEMPTS = 6
     DEFAULT_AGENT_STEPS = 64
 
-    def __init__(self, ollama: OllamaService, workspace_root: str | None = None, max_steps: int = DEFAULT_AGENT_STEPS, max_attempts: int = MAX_ATTEMPTS, max_output_chars: int = 12000, budget: ExecutionBudget | None = None, network_policy: NetworkPolicy | None = None) -> None:
+    def __init__(self, ollama: OllamaService, workspace_root: str | None = None, max_steps: int = DEFAULT_AGENT_STEPS, max_attempts: int = MAX_ATTEMPTS, max_output_chars: int = 12000, budget: ExecutionBudget | None = None, network_policy: NetworkPolicy | None = None, execution_fence: ExecutionFence | None = None) -> None:
         self.ollama = ollama
         self.workspace_root = workspace_root
         self.budget = budget or ExecutionBudget()
@@ -29,6 +34,20 @@ class ReliableAgentExecutor:
         self.max_attempts = max(1, min(int(max_attempts), self.MAX_ATTEMPTS, self.budget.max_recovery_attempts))
         self.max_output_chars = max(256, min(int(max_output_chars), self.budget.max_output_chars))
         self.network_policy = network_policy or NetworkPolicy()
+        self.execution_fence = execution_fence
+
+    def _bind_execution_fence(self, executor: AgentExecutor) -> None:
+        """Bind the durable fence to every mutation-capable tool created by AgentExecutor."""
+        if self.execution_fence is None:
+            return
+        workspace = executor.workspace
+        fence = self.execution_fence
+        executor.write_file = WriteFileTool(workspace_root=workspace, execution_fence=fence)
+        executor.make_directory = MakeDirectoryTool(workspace_root=workspace, execution_fence=fence)
+        executor.copy_file = CopyFileTool(workspace_root=workspace, execution_fence=fence)
+        executor.move_file = MoveFileTool(workspace_root=workspace, execution_fence=fence)
+        executor.delete_file = DeleteFileTool(workspace_root=workspace, execution_fence=fence)
+        executor.terminal = TerminalTool(workspace_root=workspace, network_policy=self.network_policy, execution_fence=fence)
 
     @staticmethod
     def _records(result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -124,11 +143,12 @@ The goal of this recovery attempt is to finish the ORIGINAL MISSION, not to expl
             if elapsed_before_attempt >= self.budget.max_runtime_seconds: break
             effective_prompt = original if attempt == 1 else self._continuation_prompt(original, attempt, last_error, last_result)
             executor = AgentExecutor(self.ollama, workspace_root=self.workspace_root, max_steps=self.max_steps, max_output_chars=self.max_output_chars)
+            self._bind_execution_fence(executor)
             terminal = getattr(executor, "terminal", None)
             if terminal is not None:
                 terminal.network_policy = self.network_policy
             attempt_started_at = monotonic()
-            logger.info("Reliable agent attempt started attempt=%s max_attempts=%s elapsed_seconds=%.3f remaining_budget_seconds=%.3f", attempt, self.max_attempts, elapsed_before_attempt, max(0.0, self.budget.max_runtime_seconds - elapsed_before_attempt))
+            logger.info("Reliable agent attempt started attempt=%s max_attempts=%s elapsed_seconds=%.3f remaining_budget_seconds=%.3f fenced=%s", attempt, self.max_attempts, elapsed_before_attempt, max(0.0, self.budget.max_runtime_seconds - elapsed_before_attempt), self.execution_fence is not None)
             try:
                 result = executor.execute(effective_prompt)
                 result = enrich_execution_evidence(result, started_at=started_at, recovery_attempts=attempt - 1, retries=attempt - 1); last_result = result
