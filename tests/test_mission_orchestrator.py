@@ -32,7 +32,7 @@ class FakeDeveloper:
 
 class CheckpointingFakeDeveloper(FakeDeveloper):
     def run(self, mission_id, objective, max_retries=3, **kwargs):
-        memory = MissionMemory(mission_id, objective, status="running")
+        memory = self.memory_store.load(mission_id) or MissionMemory(mission_id, objective, status="running")
         memory.begin_execution("acceptance", f"{mission_id}:acceptance:1")
         self.memory_store.save(memory)
         return super().run(mission_id, objective, max_retries, **kwargs)
@@ -91,6 +91,39 @@ def test_orchestrator_finalizes_active_execution_after_completion():
     assert memory.active_task == ""
     assert memory.active_execution_id == ""
     assert memory.checkpoints[-1]["summary"] == "terminal mission state finalized: completed"
+
+
+def test_orchestrator_persists_ordered_lifecycle_events():
+    developer = FakeDeveloper()
+    events = []
+    orchestrator = MissionOrchestrator(developer, events.append)
+
+    orchestrator.run("m-events", "Implement a feature")
+
+    memory = developer.memory_store.load("m-events")
+    assert memory is not None
+    assert [item["phase"] for item in memory.events] == [
+        "contract", "recon", "plan", "execute", "verify", "accept", "complete"
+    ]
+    assert [item["sequence"] for item in memory.events] == list(range(1, 8))
+    assert memory.event_sequence == 7
+    assert memory.events[-1]["status"] == "completed"
+    assert len(events) == len(memory.events)
+
+
+def test_orchestrator_cancel_persists_terminal_event():
+    developer = FakeDeveloper()
+    memory = MissionMemory("m-cancel", "Implement a feature")
+    developer.memory_store.save(memory)
+    orchestrator = MissionOrchestrator(developer)
+
+    result = orchestrator.cancel("m-cancel")
+
+    assert result["status"] == "cancelled"
+    stored = developer.memory_store.load("m-cancel")
+    assert stored is not None
+    assert stored.events[-1]["phase"] == "cancelled"
+    assert stored.events[-1]["status"] == "cancelled"
 
 
 def test_orchestrator_cancel_delegates_and_emits_terminal_event():
