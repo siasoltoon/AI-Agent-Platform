@@ -1,7 +1,6 @@
-import os
-
 import pytest
 
+from agent_core import network_sandbox
 from agent_core.network_sandbox import NetworkSandbox, NetworkSandboxError
 
 
@@ -15,23 +14,26 @@ def test_none_does_not_wrap_process():
     assert NetworkSandbox("none").wrap(["pytest", "-q"]) == ["pytest", "-q"]
 
 
-def test_native_wraps_on_hosts_with_unshare(monkeypatch):
-    monkeypatch.setattr(os, "name", "posix")
+def test_native_wraps_when_supported(monkeypatch):
+    monkeypatch.setattr(network_sandbox.os, "name", "posix")
+    monkeypatch.setattr(network_sandbox.shutil, "which", lambda command: "/usr/bin/unshare" if command == "unshare" else None)
     sandbox = NetworkSandbox("native")
-    monkeypatch.setattr(sandbox, "native_supported", True)
+    assert sandbox.native_supported is True
     assert sandbox.wrap(["python", "-c", "print(1)"]) == ["unshare", "--net", "--", "python", "-c", "print(1)"]
     assert sandbox.snapshot()["enforced"] is True
 
 
 def test_native_fails_closed_when_unavailable(monkeypatch):
+    monkeypatch.setattr(network_sandbox.os, "name", "posix")
+    monkeypatch.setattr(network_sandbox.shutil, "which", lambda command: None)
     sandbox = NetworkSandbox("native")
-    monkeypatch.setattr(sandbox, "native_supported", False)
     with pytest.raises(NetworkSandboxError, match="Native network isolation is unavailable"):
         sandbox.wrap(["python", "-c", "print(1)"])
 
 
 def test_fail_closed_mode_never_executes_without_native_support(monkeypatch):
+    monkeypatch.setattr(network_sandbox.os, "name", "posix")
+    monkeypatch.setattr(network_sandbox.shutil, "which", lambda command: None)
     sandbox = NetworkSandbox("fail-closed")
-    monkeypatch.setattr(sandbox, "native_supported", False)
     with pytest.raises(NetworkSandboxError):
         sandbox.wrap(["python", "-c", "print(1)"])
