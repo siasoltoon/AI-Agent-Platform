@@ -9,8 +9,10 @@ import uuid
 
 from fastapi import APIRouter, HTTPException
 
+from agent_core.mission_memory import MissionMemoryStore
 from agent_core.mission_service import MissionService
 from agent_core.runtime import AgentRuntime
+from backend.storage.mission_store import SQLiteMissionStore
 from backend.storage.task_store import TaskQueueCapacityError, TaskStore
 from config.production_config import CONFIG
 from task_engine.contracts import TaskRequest, TaskResponse, TaskStatus
@@ -24,8 +26,9 @@ runtime = AgentRuntime()
 command_registry = CommandRegistry()
 task_router = TaskRouter(command_registry)
 TASK_STORE = TaskStore(os.getenv("TASK_DB_PATH", "data/tasks.db"))
+MISSION_STORE = SQLiteMissionStore(os.getenv("TASK_DB_PATH", "data/tasks.db"))
 TASK_RUNNER = None
-mission_service = MissionService(runtime=runtime)
+mission_service = MissionService(runtime=runtime, memory_store=MissionMemoryStore(MISSION_STORE))
 
 
 def _execute_agent_task(task: TaskRequest, *, task_id: str) -> dict:
