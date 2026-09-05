@@ -104,7 +104,7 @@ class TerminalTool(BaseTool):
             raise PermissionError(f"Terminal command is not allowed: {executable}")
         if self._contains_blocked_shell_syntax(command) or self._contains_blocked_command(command):
             raise PermissionError("Terminal command contains a blocked operation.")
-        self.network_policy.check_command(executable)
+        self.network_policy.check_command(executable, command)
         network_evidence = self.network_policy.evidence(executable, allowed=True)
 
         if executable == "type":
