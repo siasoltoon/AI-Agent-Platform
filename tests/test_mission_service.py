@@ -1,3 +1,4 @@
+from agent_core.mission_memory import MissionMemory
 from agent_core.mission_service import MissionService
 
 
@@ -32,3 +33,31 @@ def test_mission_service_exposes_professional_metadata(monkeypatch):
     assert captured["kwargs"]["model"] is None
     assert captured["kwargs"]["timeout_seconds"] is None
     assert captured["kwargs"]["metadata"]["network_access"] == "restricted"
+
+
+def test_mission_service_inspect_returns_bounded_ordered_event_history():
+    service = MissionService(runtime=FakeRuntime())
+    memory = MissionMemory("m1", "Implement a feature")
+    memory.record_event(phase="contract", status="completed", mission_id="m1")
+    memory.record_event(phase="plan", status="delegated", mission_id="m1")
+    memory.record_event(phase="execute", status="delegated", mission_id="m1")
+    service.developer.memory_store.save(memory)
+
+    snapshot = service.inspect("m1", event_limit=2)
+
+    assert snapshot["mission_id"] == "m1"
+    assert snapshot["event_count"] == 3
+    assert snapshot["events_truncated"] is True
+    assert [event["sequence"] for event in snapshot["events"]] == [2, 3]
+
+
+def test_mission_service_inspect_rejects_invalid_event_limit():
+    service = MissionService(runtime=FakeRuntime())
+
+    for limit in (0, 1001):
+        try:
+            service.inspect("m1", event_limit=limit)
+        except ValueError as exc:
+            assert "event_limit" in str(exc)
+        else:
+            raise AssertionError("invalid event_limit should fail")
