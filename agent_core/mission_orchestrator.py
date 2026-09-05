@@ -85,8 +85,6 @@ class MissionOrchestrator:
             self.developer.memory_store.save(memory)
             return
 
-        if outcome not in {"committed", ""}:
-            return
         result = memory.last_execution
         if not isinstance(result, dict):
             return
@@ -98,6 +96,7 @@ class MissionOrchestrator:
         if memory.active_task not in memory.completed:
             memory.completed.append(memory.active_task)
         memory.pending = [item for item in memory.pending if item != memory.active_task]
+        memory.active_execution_status = "committed"
         memory.checkpoint(
             step_id=memory.active_task,
             summary="reconciled previously committed execution after interruption",
