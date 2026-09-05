@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 import time
@@ -155,6 +156,48 @@ class ExecutionLedger:
             )
             connection.commit()
             return cursor.rowcount == 1
+
+    def commit_task_if_current(
+        self,
+        task_id: str,
+        execution_id: str,
+        fencing_token: int,
+        *,
+        result: Any,
+        metadata: dict[str, Any],
+        now: float | None = None,
+    ) -> bool:
+        """Atomically commit the ledger attempt and TaskStore completion under its fence."""
+        timestamp = time.time() if now is None else float(now)
+        result_json = json.dumps(result, ensure_ascii=False, default=str)
+        metadata_json = json.dumps(metadata, ensure_ascii=False, default=str)
+        result_hash = __import__("hashlib").sha256(result_json.encode("utf-8")).hexdigest()
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            task = connection.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if task is None or task["status"] != "running":
+                connection.rollback()
+                return False
+            ledger_cursor = connection.execute(
+                "UPDATE execution_attempts SET state='committed', finished_at=?, result_hash=? WHERE task_id=? AND execution_id=? AND fencing_token=? AND state='running' AND fencing_token=(SELECT MAX(fencing_token) FROM execution_attempts WHERE task_id=?)",
+                (timestamp, result_hash, task_id, execution_id, int(fencing_token), task_id),
+            )
+            if ledger_cursor.rowcount != 1:
+                connection.rollback()
+                return False
+            task_cursor = connection.execute(
+                "UPDATE tasks SET status='completed', completed_at=?, result_json=?, error=NULL, metadata_json=? WHERE id=? AND status='running'",
+                (timestamp, result_json, metadata_json, task_id),
+            )
+            if task_cursor.rowcount != 1:
+                connection.rollback()
+                return False
+            connection.execute(
+                "INSERT INTO task_events (task_id, created_at, event_type, status, detail_json) VALUES (?, ?, ?, ?, ?)",
+                (task_id, timestamp, "status_changed", "completed", json.dumps({"execution_id": execution_id, "fencing_token": int(fencing_token)}, ensure_ascii=False)),
+            )
+            connection.commit()
+            return True
 
     def list_attempts(self, task_id: str, *, limit: int = 100) -> list[dict[str, Any]]:
         limit = max(1, min(int(limit), 500))
