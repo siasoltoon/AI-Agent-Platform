@@ -33,6 +33,7 @@ This document defines the engineering direction for heavy autonomous software mi
 - Terminal missions clear stale active-execution identity only after the terminal state is reached, while retaining a checkpoint that records the finalization event.
 - Lifecycle events are durably ordered in mission memory, allowing audit, diagnostics, and resume tooling to reconstruct the orchestrator's phase history.
 - Event persistence occurs before an external event sink is notified, so observability consumers cannot become the source of truth or prevent durable history from being recorded.
+- Operational inspection is read-only and bounded: callers can retrieve a mission snapshot and a limited suffix of its event history without mutating mission state.
 - The platform should prefer deterministic gates for safety-critical decisions and use the model for planning, implementation, diagnosis, and adaptation.
 
 ## Current architecture
@@ -56,5 +57,7 @@ Acceptance exposes network capability compliance as an explicit gate in addition
 Terminal checkpoint finalization is performed by the orchestrator after the developer reaches `completed` or `cancelled`. The final checkpoint preserves the active execution ID for auditability, then the active execution fields are cleared so a terminal mission cannot be mistaken for an interrupted in-flight execution on a later resume.
 
 The orchestrator also persists an ordered lifecycle event stream (`contract -> recon -> plan -> execute -> verify -> accept -> terminal`) inside the same mission memory record. This is intentionally a compact audit history rather than a replacement for execution evidence: tool records and verification remain authoritative for what actually happened.
+
+The mission service exposes a read-only inspection surface at `GET /tasks/{task_id}/mission`. It returns the durable mission snapshot plus `event_count` and a bounded event suffix (`event_limit`, 1–1000). A truncated response is explicitly marked with `events_truncated` so operators never mistake a bounded view for the complete history.
 
 The architecture is intentionally incremental. Each hardening stage must preserve the existing production path and add executable evidence rather than creating parallel fake implementations.
