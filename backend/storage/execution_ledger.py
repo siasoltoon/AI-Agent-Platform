@@ -253,10 +253,11 @@ class ExecutionLedger:
                 connection.rollback()
                 return False
             task_metadata = json.loads(task["metadata_json"] or "{}")
+            recorded_execution = task_metadata.get("execution_id")
             if (
                 str(current["execution_id"]) != str(execution_id)
                 or current["state"] not in {"created", "running"}
-                or str(task_metadata.get("execution_id")) != str(execution_id)
+                or (recorded_execution is not None and str(recorded_execution) != str(execution_id))
             ):
                 connection.rollback()
                 return False
