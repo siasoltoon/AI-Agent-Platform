@@ -12,12 +12,14 @@ class MissionContract:
 
     The contract deliberately uses conservative heuristics: ambiguous objectives
     keep the stronger requirement instead of silently accepting less evidence.
+    Network access is an explicit capability; it is never inferred from tool output.
     """
 
     objective: str
     read_only: bool
     requires_tests: bool
     requires_build: bool
+    network_access: str = "restricted"
     requires_inspection: bool = True
     requires_final_review: bool = True
     requires_execution_evidence: bool = True
@@ -29,9 +31,6 @@ class MissionContract:
             raise ValueError("Mission objective cannot be empty")
         lower = text.lower()
 
-        # A scoped implementation such as "Create X. Do not modify any other
-        # files." is not read-only. The "other" qualifier is intentionally
-        # excluded here, matching the runtime mission-policy semantics.
         read_only = bool(re.search(
             r"\bread[- ]only\b|"
             r"\bdo not (?:modify|change|write|delete|create)\b(?![^.\n]*\bother\b)|"
@@ -40,7 +39,6 @@ class MissionContract:
             r"\bdo not alter (?:the )?(?:workspace|repository|files?)\b",
             lower,
         ))
-
         docs_only = bool(re.search(
             r"\b(?:documentation|readme|docs?)\b.*\bonly\b|\bonly\b.*\b(?:documentation|readme|docs?)\b",
             lower,
@@ -59,6 +57,18 @@ class MissionContract:
             lower,
         ))
 
+        explicit_network_allow = bool(re.search(
+            r"\b(?:allow|enable|require|requires|need|needs)\b[^.\n]*\b(?:network|internet)\b|"
+            r"\b(?:network|internet)\b[^.\n]*\b(?:allow|enabled|required|access)\b",
+            lower,
+        ))
+        explicit_network_deny = bool(re.search(
+            r"\b(?:deny|disable|block|without|no)\b[^.\n]*\b(?:network|internet)\b|"
+            r"\b(?:network|internet)\b[^.\n]*\b(?:denied|disabled|blocked|forbidden)\b",
+            lower,
+        ))
+        network_access = "deny" if explicit_network_deny else "allow" if explicit_network_allow else "restricted"
+
         requires_tests = explicit_tests or (implementation and not docs_only and not read_only)
         requires_build = build and not read_only
 
@@ -67,6 +77,7 @@ class MissionContract:
             read_only=read_only,
             requires_tests=requires_tests,
             requires_build=requires_build,
+            network_access=network_access,
             requires_inspection=inspection or implementation or not read_only,
         )
 
