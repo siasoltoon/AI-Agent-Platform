@@ -8,7 +8,7 @@ from agent_core.verification import verify_execution
 
 
 class CheckpointedRuntime:
-    """Persist an active execution before delegation and commit verified results after it returns."""
+    """Persist execution identity and its outcome around external work."""
 
     def __init__(self, runtime: Any, memory_store: Any, mission_id: str):
         self.runtime = runtime
@@ -47,7 +47,16 @@ class CheckpointedRuntime:
             self.memory_store.save(memory)
         try:
             result = self.runtime.execute(prompt, task_id=task_id, **kwargs)
-        except BaseException:
+        except BaseException as exc:
+            latest = self.memory_store.load(self.mission_id)
+            if latest is not None and latest.active_execution_id == task_id:
+                latest.mark_execution_interrupted(str(exc))
+                latest.checkpoint(
+                    step_id=graph_task_id,
+                    summary="external execution interrupted before a verified outcome",
+                    evidence={"execution_id": task_id, "outcome": "interrupted", "error": str(exc)},
+                )
+                self.memory_store.save(latest)
             raise
         execution = dict(self._execution_result(result))
         verification = verify_execution(execution)
@@ -55,4 +64,14 @@ class CheckpointedRuntime:
             execution["task_id"] = task_id
             memory.commit_execution(task_id=graph_task_id, execution_id=task_id, result=execution)
             self.memory_store.save(memory)
+        elif memory is not None:
+            latest = self.memory_store.load(self.mission_id)
+            if latest is not None and latest.active_execution_id == task_id:
+                latest.mark_execution_ambiguous(f"execution returned without independently verified evidence: {verification.blockers}")
+                latest.checkpoint(
+                    step_id=graph_task_id,
+                    summary="external execution returned an ambiguous outcome; retry requires explicit recovery",
+                    evidence={"execution_id": task_id, "outcome": "ambiguous", "blockers": verification.blockers},
+                )
+                self.memory_store.save(latest)
         return result
