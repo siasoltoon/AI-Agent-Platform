@@ -10,7 +10,7 @@ import requests
 
 
 class RemoteExecutionAuthority:
-    """Expose the controller's authoritative execution ledger to remote workers."""
+    """Expose the controller's authoritative execution and side-effect ledgers."""
 
     def __init__(self, base_url: str, *, token: str | None = None, timeout: float = 5.0) -> None:
         self.base_url = str(base_url).rstrip("/")
@@ -33,7 +33,8 @@ class RemoteExecutionAuthority:
         except ValueError:
             body = {"error": response.text.strip() or response.reason}
         if not response.ok:
-            raise RuntimeError(f"Remote execution authority HTTP {response.status_code}: {body.get('error') or body.get('detail') or body}")
+            detail = body.get("error") or body.get("detail") or body
+            raise RuntimeError(f"Remote execution authority HTTP {response.status_code}: {detail}")
         return body if isinstance(body, dict) else {}
 
     def fence_check(self, task_id: str, execution_id: str, fencing_token: int) -> bool:
@@ -51,18 +52,14 @@ class RemoteExecutionAuthority:
             payload["now"] = float(now)
         return self._post("/internal/execution/side-effects/begin", payload).get("record", {})
 
-    def commit(self, idempotency_key: str, *, result: Any = None, now: float | None = None) -> bool:
-        payload = {"idempotency_key": idempotency_key, "result": result}
+    def commit(self, idempotency_key: str, *, result: Any = None, now: float | None = None, execution_id: str | None = None, fencing_token: int | None = None) -> bool:
+        payload = {"idempotency_key": idempotency_key, "result": result, "execution_id": execution_id, "fencing_token": fencing_token}
         if now is not None:
             payload["now"] = float(now)
         return bool(self._post("/internal/execution/side-effects/commit", payload).get("committed"))
 
     def transition(self, idempotency_key: str, state: str, *, error: str | None = None, now: float | None = None, execution_id: str | None = None, fencing_token: int | None = None) -> bool:
-        payload = {"idempotency_key": idempotency_key, "state": state, "error": error}
-        if execution_id is not None:
-            payload["execution_id"] = str(execution_id)
-        if fencing_token is not None:
-            payload["fencing_token"] = int(fencing_token)
+        payload = {"idempotency_key": idempotency_key, "state": state, "error": error, "execution_id": execution_id, "fencing_token": fencing_token}
         if now is not None:
             payload["now"] = float(now)
         return bool(self._post("/internal/execution/side-effects/transition", payload).get("transitioned"))
