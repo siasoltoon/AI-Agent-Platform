@@ -25,31 +25,32 @@ class ExecutionFence:
         self.side_effects = side_effects or SideEffectLedger(ledger.path)
 
     def assert_current(self) -> None:
-        if not self.ledger.fence_check(self.task_id, self.execution_id, self.fencing_token):
+        try:
+            current = self.ledger.fence_check(self.task_id, self.execution_id, self.fencing_token)
+        except Exception as exc:
+            raise ExecutionFenceError(f"Execution authority is unavailable; refusing side effect: {exc}") from exc
+        if not current:
             raise ExecutionFenceError("Execution fence rejected side effect because this attempt is no longer current.")
 
     def key(self, tool_name: str, arguments: Any) -> str:
-        """Build a stable key scoped to the task, not the worker/execution attempt."""
-        payload = json.dumps(
-            {"task_id": self.task_id, "tool": str(tool_name), "arguments": arguments},
-            ensure_ascii=False,
-            sort_keys=True,
-            default=str,
-        )
+        payload = json.dumps({"task_id": self.task_id, "tool": str(tool_name), "arguments": arguments}, ensure_ascii=False, sort_keys=True, default=str)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def begin_side_effect(self, tool_name: str, arguments: Any) -> tuple[str, dict[str, Any]]:
         self.assert_current()
         key = self.key(tool_name, arguments)
         request_hash = self.side_effects.request_hash(tool_name, arguments)
-        record = self.side_effects.begin(
-            idempotency_key=key,
-            task_id=self.task_id,
-            execution_id=self.execution_id,
-            fencing_token=self.fencing_token,
-            tool_name=str(tool_name),
-            request_hash=request_hash,
-        )
+        try:
+            record = self.side_effects.begin(
+                idempotency_key=key,
+                task_id=self.task_id,
+                execution_id=self.execution_id,
+                fencing_token=self.fencing_token,
+                tool_name=str(tool_name),
+                request_hash=request_hash,
+            )
+        except Exception as exc:
+            raise ExecutionFenceError(f"Execution authority is unavailable; refusing side effect: {exc}") from exc
         if record.get("request_hash") != request_hash or record.get("task_id") != self.task_id:
             raise ExecutionFenceError("Side-effect idempotency key collision detected; request identity does not match.")
         if record.get("execution_id") != self.execution_id or int(record.get("fencing_token", -1)) != self.fencing_token:
@@ -71,7 +72,11 @@ class ExecutionFence:
             return json.loads(record["result_json"])
         if record.get("state") != "running":
             raise ExecutionFenceError("Side-effect is not in a committable running state.")
-        if not self.side_effects.commit(key, result=result):
+        try:
+            committed = self.side_effects.commit(key, result=result)
+        except Exception as exc:
+            raise ExecutionFenceError(f"Execution authority is unavailable; side-effect commit is untrusted: {exc}") from exc
+        if not committed:
             raise ExecutionFenceError("Execution fence rejected side-effect commit.")
         return result
 
@@ -79,4 +84,4 @@ class ExecutionFence:
         record = self.side_effects.get(key)
         if record is None or record.get("task_id") != self.task_id or record.get("execution_id") != self.execution_id or int(record.get("fencing_token", -1)) != self.fencing_token:
             raise ExecutionFenceError("Execution fence rejected side-effect ambiguity transition because ownership changed.")
-        self.side_effects.transition(key, "ambiguous", error=error)
+        self.side_effects.transition(key, "ambiguous", error=error, execution_id=self.execution_id, fencing_token=self.fencing_token)
