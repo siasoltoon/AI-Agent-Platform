@@ -1,6 +1,8 @@
 import os
 import sys
 
+import pytest
+
 from tool_system.process_runner import IsolatedProcessRunner, ProcessLimits
 from tool_system.terminal_tools import TerminalTool
 
@@ -31,3 +33,25 @@ def test_process_runner_timeout_kills_process_group(tmp_path):
     assert code == 124
     assert timed_out is True
     assert "timed out" in stderr
+
+
+def test_process_limits_require_positive_values():
+    with pytest.raises(ValueError):
+        ProcessLimits(timeout_seconds=0, max_output_chars=1000)
+    with pytest.raises(ValueError):
+        ProcessLimits(timeout_seconds=1, max_output_chars=0)
+    with pytest.raises(ValueError):
+        ProcessLimits(timeout_seconds=1, max_output_chars=1000, max_cpu_seconds=0)
+    with pytest.raises(ValueError):
+        ProcessLimits(timeout_seconds=1, max_output_chars=1000, max_memory_bytes=0)
+    with pytest.raises(ValueError):
+        ProcessLimits(timeout_seconds=1, max_output_chars=1000, max_processes=0)
+
+
+def test_process_runner_exposes_resource_preexec_on_posix():
+    limits = ProcessLimits(timeout_seconds=5, max_output_chars=1000)
+    hook = IsolatedProcessRunner._resource_preexec(limits)
+    if os.name == "nt":
+        assert hook is None
+    else:
+        assert callable(hook)
