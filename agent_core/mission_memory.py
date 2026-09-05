@@ -21,6 +21,7 @@ class MissionMemory:
     changed_files: list[str] = field(default_factory=list)
     tests: list[dict[str, Any]] = field(default_factory=list)
     checkpoints: list[dict[str, Any]] = field(default_factory=list)
+    events: list[dict[str, Any]] = field(default_factory=list)
     task_attempts: dict[str, int] = field(default_factory=dict)
     last_execution: dict[str, Any] = field(default_factory=dict)
     execution_evidence: dict[str, Any] = field(default_factory=dict)
@@ -28,6 +29,7 @@ class MissionMemory:
     active_task: str = ""
     active_execution_id: str = ""
     checkpoint_sequence: int = 0
+    event_sequence: int = 0
 
     VALID_STATUSES = {"pending", "running", "completed", "blocked", "cancelled", "interrupted"}
     TERMINAL_STATUSES = {"completed", "cancelled"}
@@ -46,6 +48,7 @@ class MissionMemory:
         if self.status not in self.VALID_STATUSES:
             raise ValueError(f"Invalid mission status: {self.status}")
         self.checkpoint_sequence = max(0, int(self.checkpoint_sequence))
+        self.event_sequence = max(0, int(self.event_sequence))
 
     def transition(self, status: str) -> None:
         """Apply an explicit lifecycle transition and reject invalid state jumps."""
@@ -62,6 +65,15 @@ class MissionMemory:
         item = {"sequence": self.checkpoint_sequence, "step_id": step_id, "summary": summary, "evidence": evidence or {}}
         self.checkpoints.append(item)
         return item
+
+    def record_event(self, *, phase: str, status: str, mission_id: str, detail: str = "") -> dict[str, Any]:
+        """Append an ordered lifecycle event for audit and recovery inspection."""
+        if mission_id != self.mission_id:
+            raise ValueError("Event mission_id does not match mission memory")
+        self.event_sequence += 1
+        event = {"sequence": self.event_sequence, "phase": str(phase), "status": str(status), "mission_id": mission_id, "detail": str(detail)}
+        self.events.append(event)
+        return event
 
     def begin_execution(self, task_id: str, execution_id: str) -> None:
         """Persist the exact execution being attempted before external side effects occur."""
@@ -139,6 +151,7 @@ class MissionMemoryStore:
             changed_files=list(payload.get("changed_files", [])),
             tests=list(payload.get("tests", [])),
             checkpoints=list(payload.get("checkpoints", [])),
+            events=list(payload.get("events", [])),
             task_attempts={key: int(value) for key, value in payload.get("task_attempts", {}).items()},
             last_execution=dict(payload.get("last_execution", {})),
             execution_evidence=dict(payload.get("execution_evidence", {})),
@@ -146,4 +159,5 @@ class MissionMemoryStore:
             active_task=str(payload.get("active_task", "")),
             active_execution_id=str(payload.get("active_execution_id", "")),
             checkpoint_sequence=int(payload.get("checkpoint_sequence", 0)),
+            event_sequence=int(payload.get("event_sequence", 0)),
         )
