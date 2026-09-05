@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import threading
@@ -48,6 +49,7 @@ class ExecutionLedger:
                     started_at REAL,
                     finished_at REAL,
                     result_hash TEXT,
+                    result_json TEXT,
                     error TEXT
                 )
             """)
@@ -55,6 +57,10 @@ class ExecutionLedger:
             connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_execution_task_idempotency ON execution_attempts(task_id, idempotency_key) WHERE idempotency_key IS NOT NULL")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_execution_task_state ON execution_attempts(task_id, state)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_execution_task_fence ON execution_attempts(task_id, fencing_token)")
+            # Existing installations created before result persistence receive the column without destructive migration.
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(execution_attempts)").fetchall()}
+            if "result_json" not in columns:
+                connection.execute("ALTER TABLE execution_attempts ADD COLUMN result_json TEXT")
             connection.commit()
 
     @staticmethod
@@ -145,14 +151,15 @@ class ExecutionLedger:
             ).fetchone()
             return bool(row and int(row["fencing_token"]) == int(fencing_token) and row["state"] == "running")
 
-    def commit_if_current(self, task_id: str, execution_id: str, fencing_token: int, *, result_hash: str | None = None, now: float | None = None) -> bool:
+    def commit_if_current(self, task_id: str, execution_id: str, fencing_token: int, *, result_hash: str | None = None, result: Any = None, now: float | None = None) -> bool:
         """Commit only the current fenced attempt; stale workers cannot commit."""
         timestamp = time.time() if now is None else float(now)
+        result_json = json.dumps(result, ensure_ascii=False, default=str) if result is not None else None
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             cursor = connection.execute(
-                "UPDATE execution_attempts SET state='committed', finished_at=?, result_hash=? WHERE task_id=? AND execution_id=? AND fencing_token=? AND state='running' AND fencing_token=(SELECT MAX(fencing_token) FROM execution_attempts WHERE task_id=?)",
-                (timestamp, result_hash, task_id, execution_id, int(fencing_token), task_id),
+                "UPDATE execution_attempts SET state='committed', finished_at=?, result_hash=?, result_json=? WHERE task_id=? AND execution_id=? AND fencing_token=? AND state='running' AND fencing_token=(SELECT MAX(fencing_token) FROM execution_attempts WHERE task_id=?)",
+                (timestamp, result_hash, result_json, task_id, execution_id, int(fencing_token), task_id),
             )
             connection.commit()
             return cursor.rowcount == 1
@@ -171,7 +178,7 @@ class ExecutionLedger:
         timestamp = time.time() if now is None else float(now)
         result_json = json.dumps(result, ensure_ascii=False, default=str)
         metadata_json = json.dumps(metadata, ensure_ascii=False, default=str)
-        result_hash = __import__("hashlib").sha256(result_json.encode("utf-8")).hexdigest()
+        result_hash = hashlib.sha256(result_json.encode("utf-8")).hexdigest()
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             task = connection.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
@@ -179,8 +186,8 @@ class ExecutionLedger:
                 connection.rollback()
                 return False
             ledger_cursor = connection.execute(
-                "UPDATE execution_attempts SET state='committed', finished_at=?, result_hash=? WHERE task_id=? AND execution_id=? AND fencing_token=? AND state='running' AND fencing_token=(SELECT MAX(fencing_token) FROM execution_attempts WHERE task_id=?)",
-                (timestamp, result_hash, task_id, execution_id, int(fencing_token), task_id),
+                "UPDATE execution_attempts SET state='committed', finished_at=?, result_hash=?, result_json=? WHERE task_id=? AND execution_id=? AND fencing_token=? AND state='running' AND fencing_token=(SELECT MAX(fencing_token) FROM execution_attempts WHERE task_id=?)",
+                (timestamp, result_hash, result_json, task_id, execution_id, int(fencing_token), task_id),
             )
             if ledger_cursor.rowcount != 1:
                 connection.rollback()
