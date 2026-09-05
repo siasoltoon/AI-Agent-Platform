@@ -105,6 +105,18 @@ async def get_task_events(task_id: str) -> dict:
     return {"task_id": task_id, "events": TASK_STORE.events(task_id)}
 
 
+@router.get("/{task_id}/mission")
+async def get_mission_audit(task_id: str, event_limit: int = 100) -> dict:
+    """Expose the durable professional-mission state and bounded lifecycle event history."""
+    try:
+        snapshot = mission_service.inspect(task_id, event_limit=event_limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="Mission not found.")
+    return snapshot
+
+
 @router.post("/{task_id}/cancel", response_model=TaskResponse)
 async def cancel_task(task_id: str) -> TaskResponse:
     logger.warning("[CANCEL] backend endpoint entered task_id=%s", task_id)
