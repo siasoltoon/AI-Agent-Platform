@@ -126,6 +126,15 @@ async def cancel_task(task_id: str) -> TaskResponse:
         logger.warning("[CANCEL] backend task not found task_id=%s", task_id)
         raise HTTPException(status_code=404, detail="Task not found.") from exc
 
+    command = str(task.get("metadata", {}).get("command", ""))
+    if command == "mission.execute":
+        logger.warning("[CANCEL] routing professional mission through MissionService task_id=%s", task_id)
+        try:
+            mission_result = mission_service.cancel(task_id, objective=task.get("prompt"))
+            logger.warning("[CANCEL] mission orchestrator cancellation finished task_id=%s result=%s", task_id, mission_result)
+        except ValueError as exc:
+            logger.warning("[CANCEL] mission memory cancellation could not be persisted task_id=%s error=%s", task_id, exc)
+
     logger.warning("[CANCEL] backend store cancelled task_id=%s status=%s", task_id, task.get("status"))
     logger.warning("[CANCEL] backend propagating to worker task_id=%s worker_base_url=%s", task_id, runtime.worker_client.base_url)
     worker_result = runtime.worker_client.cancel_task(task_id)
