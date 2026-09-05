@@ -228,6 +228,63 @@ class ExecutionLedger:
             connection.commit()
             return True
 
+    def restore_committed_task_if_current(
+        self,
+        task_id: str,
+        execution_id: str,
+        fencing_token: int,
+        *,
+        result: Any,
+        metadata: dict[str, Any],
+        now: float | None = None,
+    ) -> bool:
+        """Restore completion only from the current committed attempt, atomically fenced."""
+        timestamp = time.time() if now is None else float(now)
+        result_json = json.dumps(result, ensure_ascii=False, default=str)
+        metadata_json = json.dumps(metadata, ensure_ascii=False, default=str)
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            task = connection.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if task is None or task["status"] != "running":
+                connection.rollback()
+                return False
+            current = connection.execute(
+                "SELECT state, fencing_token FROM execution_attempts WHERE task_id=? AND execution_id=?",
+                (task_id, execution_id),
+            ).fetchone()
+            if (
+                current is None
+                or current["state"] != "committed"
+                or int(current["fencing_token"]) != int(fencing_token)
+            ):
+                connection.rollback()
+                return False
+            newest = connection.execute(
+                "SELECT execution_id, fencing_token, state FROM execution_attempts WHERE task_id=? ORDER BY fencing_token DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            if (
+                newest is None
+                or str(newest["execution_id"]) != str(execution_id)
+                or int(newest["fencing_token"]) != int(fencing_token)
+                or newest["state"] != "committed"
+            ):
+                connection.rollback()
+                return False
+            task_cursor = connection.execute(
+                "UPDATE tasks SET status='completed', completed_at=?, result_json=?, error=NULL, metadata_json=? WHERE id=? AND status='running'",
+                (timestamp, result_json, metadata_json, task_id),
+            )
+            if task_cursor.rowcount != 1:
+                connection.rollback()
+                return False
+            connection.execute(
+                "INSERT INTO task_events (task_id, created_at, event_type, status, detail_json) VALUES (?, ?, ?, ?, ?)",
+                (task_id, timestamp, "committed_execution_restored", "completed", json.dumps({"execution_id": execution_id, "fencing_token": int(fencing_token)}, ensure_ascii=False)),
+            )
+            connection.commit()
+            return True
+
     def fail_orphaned_if_current(
         self,
         task_id: str,
