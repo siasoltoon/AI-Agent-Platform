@@ -50,7 +50,6 @@ class MissionReconciler:
             memory.status == "completed"
             and execution.get("verified") is True
             and acceptance.get("accepted") is True
-            and isinstance(evidence, dict)
             and bool(evidence)
         )
 
@@ -85,7 +84,7 @@ class MissionReconciler:
         if task_status == "completed" and mission_status == "completed" and self._is_verified_success(memory):
             return ReconciliationResult(task_id, "converged", task_status, mission_status, True, True, "both stores contain verified terminal success")
 
-        if mission_status == "completed" and self._is_verified_success(memory) and task_status != "completed":
+        if mission_status == "completed" and self._is_verified_success(memory) and task_status in {"queued", "running"}:
             execution = dict(memory.last_execution)
             updated = self.task_store.update(
                 task_id,
