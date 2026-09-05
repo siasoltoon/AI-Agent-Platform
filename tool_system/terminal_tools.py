@@ -7,6 +7,7 @@ import shlex
 from pathlib import Path
 from typing import Any
 
+from agent_core.network_policy import NetworkPolicy
 from agent_core.security_boundary import WorkspaceBoundary
 
 from .base_tool import BaseTool
@@ -36,9 +37,10 @@ class TerminalTool(BaseTool):
     })
     MAX_OUTPUT_CHARS = 12_000
 
-    def __init__(self, workspace_root: str | Path | None = None) -> None:
+    def __init__(self, workspace_root: str | Path | None = None, network_policy: NetworkPolicy | None = None) -> None:
         self.workspace = Path(workspace_root or Path.cwd()).resolve()
         self._boundary = WorkspaceBoundary(self.workspace)
+        self.network_policy = network_policy or NetworkPolicy()
         self._runner = IsolatedProcessRunner(environment=self._safe_environment())
 
     @staticmethod
@@ -102,17 +104,19 @@ class TerminalTool(BaseTool):
             raise PermissionError(f"Terminal command is not allowed: {executable}")
         if self._contains_blocked_shell_syntax(command) or self._contains_blocked_command(command):
             raise PermissionError("Terminal command contains a blocked operation.")
+        self.network_policy.check_command(executable)
+        network_evidence = self.network_policy.evidence(executable, allowed=True)
 
         if executable == "type":
             target = tokens[1] if len(tokens) > 1 else ""
             if not target or target.upper() == "NUL":
-                return {"stdout": "", "stderr": "", "code": 0, "timed_out": False}
+                return {"stdout": "", "stderr": "", "code": 0, "timed_out": False, "network_policy": network_evidence}
             path = self._safe_path(target)
             try:
                 if path.is_file():
-                    return {"stdout": self._truncate(path.read_text(encoding="utf-8")), "stderr": "", "code": 0, "timed_out": False}
+                    return {"stdout": self._truncate(path.read_text(encoding="utf-8")), "stderr": "", "code": 0, "timed_out": False, "network_policy": network_evidence}
             except OSError as exc:
-                return {"stdout": "", "stderr": str(exc), "code": 1, "timed_out": False}
+                return {"stdout": "", "stderr": str(exc), "code": 1, "timed_out": False, "network_policy": network_evidence}
 
         if executable == "mkdir":
             targets = [part for part in tokens[1:] if part not in {"-p", "--parents"}]
@@ -120,7 +124,7 @@ class TerminalTool(BaseTool):
                 raise ValueError("mkdir requires a directory path.")
             for target in targets:
                 self._safe_path(target).mkdir(parents=True, exist_ok=True)
-            return {"stdout": "", "stderr": "", "code": 0, "timed_out": False}
+            return {"stdout": "", "stderr": "", "code": 0, "timed_out": False, "network_policy": network_evidence}
 
         result_stdout, result_stderr, returncode, timed_out = self._runner.run(
             tokens,
@@ -136,5 +140,6 @@ class TerminalTool(BaseTool):
             "process_isolation": "new_process_group",
             "native_os_isolation": self._runner.isolation_mode(),
             "environment_policy": "allowlist",
+            "network_policy": network_evidence,
             "shell": False,
         }
