@@ -65,9 +65,27 @@ class MissionOrchestrator:
             raise ValueError("A persisted mission cannot be resumed with a different objective.")
 
     def _reconcile_interrupted_execution(self, mission_id: str) -> None:
-        """Advance a task only when its persisted execution is independently verifiable."""
+        """Reconcile only durable outcomes that are independently safe to commit."""
         memory = self.developer.memory_store.load(mission_id)
         if memory is None or not memory.active_task or not memory.active_execution_id:
+            return
+
+        outcome = memory.active_execution_status
+        if outcome in {"interrupted", "ambiguous"}:
+            memory.checkpoint(
+                step_id=memory.active_task,
+                summary=f"resume classified prior execution as {outcome}; task remains eligible for recovery",
+                evidence={
+                    "execution_id": memory.active_execution_id,
+                    "outcome": outcome,
+                    "error": memory.active_execution_error,
+                    "safe_to_advance": False,
+                },
+            )
+            self.developer.memory_store.save(memory)
+            return
+
+        if outcome not in {"committed", ""}:
             return
         result = memory.last_execution
         if not isinstance(result, dict):
@@ -98,7 +116,7 @@ class MissionOrchestrator:
         memory.checkpoint(
             step_id=memory.active_task or "mission",
             summary=f"terminal mission state finalized: {status}",
-            evidence={"execution_id": memory.active_execution_id, "terminal": status},
+            evidence={"execution_id": memory.active_execution_id, "terminal": status, "outcome": memory.active_execution_status},
         )
         memory.clear_execution()
         self.developer.memory_store.save(memory)
