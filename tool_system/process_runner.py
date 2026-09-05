@@ -1,7 +1,8 @@
 """Process-level controls for terminal tool execution.
 
-This module intentionally provides process isolation and bounded execution, not an
-OS sandbox. Filesystem confinement remains the responsibility of WorkspaceBoundary.
+This module provides process-group isolation and bounded execution. It is still not
+an OS sandbox; callers must provide a workspace boundary and treat the runner as a
+resource-control layer.
 """
 
 from __future__ import annotations
@@ -15,14 +16,23 @@ from typing import Mapping, Sequence
 
 @dataclass(frozen=True)
 class ProcessLimits:
-    """Portable process limits enforced by the runner."""
+    """Hard execution ceilings where the host operating system supports them."""
 
     timeout_seconds: int
     max_output_chars: int
+    max_cpu_seconds: int = 120
+    max_memory_bytes: int = 2 * 1024 * 1024 * 1024
+    max_processes: int = 64
+
+    def __post_init__(self) -> None:
+        if self.timeout_seconds < 1 or self.max_output_chars < 1:
+            raise ValueError("Process timeout and output limits must be positive")
+        if self.max_cpu_seconds < 1 or self.max_memory_bytes < 1 or self.max_processes < 1:
+            raise ValueError("Process resource limits must be positive")
 
 
 class IsolatedProcessRunner:
-    """Run one process in its own process group and terminate the group on timeout."""
+    """Run one process in its own process group with bounded resources."""
 
     def __init__(self, *, environment: Mapping[str, str]) -> None:
         self.environment = dict(environment)
@@ -36,6 +46,23 @@ class IsolatedProcessRunner:
     @staticmethod
     def _start_new_session() -> bool:
         return os.name != "nt"
+
+    @staticmethod
+    def _resource_preexec(limits: ProcessLimits):
+        if os.name == "nt":
+            return None
+        try:
+            import resource
+        except ImportError:
+            return None
+
+        def apply_limits() -> None:
+            resource.setrlimit(resource.RLIMIT_CPU, (limits.max_cpu_seconds, limits.max_cpu_seconds))
+            resource.setrlimit(resource.RLIMIT_AS, (limits.max_memory_bytes, limits.max_memory_bytes))
+            if hasattr(resource, "RLIMIT_NPROC"):
+                resource.setrlimit(resource.RLIMIT_NPROC, (limits.max_processes, limits.max_processes))
+
+        return apply_limits
 
     @staticmethod
     def _kill_process_tree(process: subprocess.Popen[str]) -> None:
@@ -69,10 +96,11 @@ class IsolatedProcessRunner:
             text=True,
             creationflags=self._creationflags(),
             start_new_session=self._start_new_session(),
+            preexec_fn=self._resource_preexec(limits),
         )
         try:
             stdout, stderr = process.communicate(timeout=limits.timeout_seconds)
-        except subprocess.TimeoutExpired as exc:
+        except subprocess.TimeoutExpired:
             self._kill_process_tree(process)
             stdout, stderr = process.communicate()
             timeout_message = f"Command timed out after {limits.timeout_seconds} seconds."
