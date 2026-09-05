@@ -8,6 +8,7 @@ from agent_core.acceptance import MissionAcceptanceGate
 from agent_core.adaptive_planner import AdaptivePlanner
 from agent_core.context_manager import MissionContextManager
 from agent_core.mission_budget import MissionBudget, MissionBudgetState
+from agent_core.mission_contract import MissionContract
 from agent_core.mission_memory import MissionMemory, MissionMemoryStore
 from agent_core.runtime import DEFAULT_LARGE_AGENT_STEPS
 from agent_core.task_graph import GraphTask, TaskGraph
@@ -147,6 +148,7 @@ class AutonomousDeveloper:
             raise ValueError("mission_id and objective are required")
         retries = max(1, min(int(max_retries), 5))
         objective = objective.strip()
+        contract = MissionContract.from_objective(objective)
         memory = self.memory_store.load(mission_id)
         if memory is None:
             memory = MissionMemory(mission_id, objective)
@@ -204,7 +206,7 @@ class AutonomousDeveloper:
                     recent = [f"{item['step_id']}: {item['summary']}" for item in memory.checkpoints[-8:]]
                     prompt = self.context.build(objective=objective, architecture=memory.architecture, active_task=task.objective, memory=str(memory.snapshot()), recent_results=recent)
                     limits = budget.execution_limits()
-                    memory.checkpoint(step_id=task.task_id, summary=f"attempt {attempt}", evidence={"budget": budget.snapshot(), "execution_limits": limits})
+                    memory.checkpoint(step_id=task.task_id, summary=f"attempt {attempt}", evidence={"budget": budget.snapshot(), "execution_limits": limits, "mission_contract": contract.snapshot()})
                     self.memory_store.save(memory)
                     try:
                         result = self.runtime.execute(
@@ -218,6 +220,8 @@ class AutonomousDeveloper:
                                 "max_output_chars": limits["max_output_chars"],
                                 "execution_profile": "large",
                                 "mission_budget": budget.snapshot(),
+                                "mission_contract": contract.snapshot(),
+                                "network_access": contract.network_access,
                             },
                         )
                         cancelled = self._cancelled_snapshot(mission_id)
@@ -286,4 +290,4 @@ class AutonomousDeveloper:
         memory.mission_budget = budget.snapshot()
         memory.transition("completed")
         self.memory_store.save(memory)
-        return {"mission_id": mission_id, "status": "completed", "verified": True, "completed_tasks": list(memory.completed), "memory": memory.snapshot(), "acceptance": {"accepted": True, "checks": gate.verification.checks}}
+        return {"mission_id": mission_id, "status": "completed", "verified": True, "completed_tasks": list(memory.completed), "memory": memory.snapshot(), "acceptance": {"accepted": True, "checks": gate.verification.checks}, "mission_contract": contract.snapshot()}
