@@ -71,23 +71,42 @@ class MissionOrchestrator:
         memory.clear_execution()
         self.developer.memory_store.save(memory)
 
-    def run(self, mission_id: str, objective: str, max_retries: int = 3) -> dict[str, Any]:
+    def run(
+        self,
+        mission_id: str,
+        objective: str,
+        max_retries: int = 3,
+        *,
+        model: str | None = None,
+        timeout_seconds: int | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Run a mission using an invocation-local checkpointing adapter.
+
+        Runtime wrapping is injected into AutonomousDeveloper.run instead of
+        mutating the shared developer runtime, so concurrent missions cannot
+        accidentally execute through one another's checkpoint adapter.
+        """
         contract = self.contract(objective)
         self._emit(MissionEvent(MissionPhase.CONTRACT, "completed", mission_id, str(contract.snapshot())))
         self._reconcile_interrupted_execution(mission_id)
         for phase in (MissionPhase.RECON, MissionPhase.PLAN, MissionPhase.EXECUTE):
             self._emit(MissionEvent(phase, "delegated", mission_id))
 
-        original_runtime = self.developer.runtime
-        self.developer.runtime = CheckpointedRuntime(
-            original_runtime,
+        checkpointed_runtime = CheckpointedRuntime(
+            self.developer.runtime,
             self.developer.memory_store,
             mission_id,
         )
-        try:
-            result = self.developer.run(mission_id, objective, max_retries=max_retries)
-        finally:
-            self.developer.runtime = original_runtime
+        result = self.developer.run(
+            mission_id,
+            objective,
+            max_retries=max_retries,
+            runtime=checkpointed_runtime,
+            model=model,
+            timeout_seconds=timeout_seconds,
+            metadata=metadata,
+        )
         status = str(result.get("status", "blocked"))
         terminal_phase = MissionPhase.COMPLETE if status == "completed" else MissionPhase.CANCELLED if status == "cancelled" else MissionPhase.BLOCKED
         self._emit(MissionEvent(MissionPhase.VERIFY, "completed" if result.get("verified") else "evaluated", mission_id))
