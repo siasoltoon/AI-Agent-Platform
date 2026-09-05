@@ -10,8 +10,13 @@ def test_mission_service_exposes_professional_metadata(monkeypatch):
 
     captured = {}
 
-    def fake_run(mission_id, objective, max_retries=3):
-        captured.update(mission_id=mission_id, objective=objective, max_retries=max_retries)
+    def fake_run(mission_id, objective, max_retries=3, **kwargs):
+        captured.update(
+            mission_id=mission_id,
+            objective=objective,
+            max_retries=max_retries,
+            kwargs=kwargs,
+        )
         return {"mission_id": mission_id, "status": "completed", "verified": True, "acceptance": {"accepted": True}}
 
     monkeypatch.setattr(service.orchestrator, "run", fake_run)
@@ -20,4 +25,10 @@ def test_mission_service_exposes_professional_metadata(monkeypatch):
     assert result["execution_mode"] == "professional_mission"
     assert result["metadata"]["mission_mode"] == "professional"
     assert result["metadata"]["mission_contract"]["requires_tests"] is True
-    assert captured == {"mission_id": "m1", "objective": "Implement a new authentication feature", "max_retries": 2}
+    assert result["metadata"]["network_access"] == "restricted"
+    assert captured["mission_id"] == "m1"
+    assert captured["objective"] == "Implement a new authentication feature"
+    assert captured["max_retries"] == 2
+    assert captured["kwargs"]["model"] is None
+    assert captured["kwargs"]["timeout_seconds"] is None
+    assert captured["kwargs"]["metadata"]["network_access"] == "restricted"
