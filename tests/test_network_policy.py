@@ -33,8 +33,31 @@ def test_invalid_network_policy_mode_is_rejected():
         NetworkPolicy("unknown")
 
 
-def test_terminal_reports_network_policy():
+def test_restricted_policy_blocks_python_network_module_escape():
+    policy = NetworkPolicy("restricted")
+    with pytest.raises(NetworkPolicyError):
+        policy.check_command("python", "python -c \"import socket; socket.create_connection(('example.com', 80))\"")
+
+
+def test_restricted_policy_blocks_node_network_api_escape():
+    policy = NetworkPolicy("restricted")
+    with pytest.raises(NetworkPolicyError):
+        policy.check_command("node", "node -e \"fetch('https://example.com')\"")
+
+
+def test_restricted_policy_allows_python_local_command():
+    policy = NetworkPolicy("restricted")
+    policy.check_command("python", "python -c \"print('local')\"")
+
+
+def test_allow_policy_skips_interpreter_escape_detection():
+    policy = NetworkPolicy("allow")
+    policy.check_command("python", "python -c \"import socket; socket.create_connection(('example.com', 80))\"")
+
+
+def test_terminal_reports_interpreter_escape_detection():
     result = TerminalTool().execute("echo hello")
     assert result["code"] == 0
+    assert result["network_policy"]["interpreter_escape_detection"] is True
     assert result["network_policy"]["mode"] == "restricted"
     assert result["network_policy"]["enforcement"] == "terminal-command-policy"
