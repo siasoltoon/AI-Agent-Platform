@@ -67,9 +67,25 @@ class SafeTaskRunner(TaskRunner):
         if self.store.is_cancelled(task_id): return
         current = self.store.get(task_id) or record
         if current.get("status") not in {TaskStatus.RUNNING.value, TaskStatus.QUEUED.value}: return
-        metadata = dict(current.get("metadata", {})); execution_id = metadata.get("execution_id")
-        if execution_id: self.execution_ledger.transition(execution_id, "ambiguous", error=error)
+        metadata = dict(current.get("metadata", {}))
+        execution_id = metadata.get("execution_id")
         metadata.update({"execution_ambiguous": True, "automatic_retry_suppressed": True, "recovery_required": True, "last_error": error})
+        if execution_id and current.get("status") == TaskStatus.RUNNING.value:
+            # Terminalize the task and its execution attempt under the same
+            # durable fence; a stale worker cannot overwrite a newer attempt.
+            failed = self.execution_ledger.fail_orphaned_if_current(
+                task_id,
+                str(execution_id),
+                error=error,
+                metadata=metadata,
+            )
+            if failed:
+                return
+            refreshed = self.store.get(task_id)
+            if refreshed is None or refreshed.get("status") != TaskStatus.RUNNING.value:
+                return
+        if execution_id:
+            self.execution_ledger.transition(execution_id, "ambiguous", error=error)
         self.store.update(task_id, status=TaskStatus.FAILED.value, completed_at=time.time(), error=error, metadata=metadata)
 
     def _execute(self, record: dict) -> None:
