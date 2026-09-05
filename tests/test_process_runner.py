@@ -6,10 +6,7 @@ from tool_system.terminal_tools import TerminalTool
 
 
 def test_terminal_uses_argument_vector_without_shell(tmp_path):
-    result = TerminalTool(workspace_root=tmp_path).execute(
-        f'{sys.executable} --version'.replace(sys.executable.split(os.sep)[-1], "python"),
-        timeout=10,
-    )
+    result = TerminalTool(workspace_root=tmp_path).execute("python --version", timeout=10)
     assert result["code"] == 0
     assert result["shell"] is False
     assert result["process_isolation"] == "new_process_group"
