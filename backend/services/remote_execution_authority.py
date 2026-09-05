@@ -57,8 +57,12 @@ class RemoteExecutionAuthority:
             payload["now"] = float(now)
         return bool(self._post("/internal/execution/side-effects/commit", payload).get("committed"))
 
-    def transition(self, idempotency_key: str, state: str, *, error: str | None = None, now: float | None = None) -> bool:
+    def transition(self, idempotency_key: str, state: str, *, error: str | None = None, now: float | None = None, execution_id: str | None = None, fencing_token: int | None = None) -> bool:
         payload = {"idempotency_key": idempotency_key, "state": state, "error": error}
+        if execution_id is not None:
+            payload["execution_id"] = str(execution_id)
+        if fencing_token is not None:
+            payload["fencing_token"] = int(fencing_token)
         if now is not None:
             payload["now"] = float(now)
         return bool(self._post("/internal/execution/side-effects/transition", payload).get("transitioned"))
