@@ -228,6 +228,59 @@ class ExecutionLedger:
             connection.commit()
             return True
 
+    def fail_orphaned_if_current(
+        self,
+        task_id: str,
+        execution_id: str,
+        *,
+        error: str,
+        metadata: dict[str, Any],
+        now: float | None = None,
+    ) -> bool:
+        """Atomically fence and fail a task only when the orphaned execution is still current."""
+        timestamp = time.time() if now is None else float(now)
+        metadata_json = json.dumps(metadata, ensure_ascii=False, default=str)
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            task = connection.execute(
+                "SELECT status, metadata_json FROM tasks WHERE id=?", (task_id,)
+            ).fetchone()
+            current = connection.execute(
+                "SELECT execution_id, fencing_token, state FROM execution_attempts WHERE task_id=? ORDER BY fencing_token DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            if task is None or task["status"] != "running" or current is None:
+                connection.rollback()
+                return False
+            task_metadata = json.loads(task["metadata_json"] or "{}")
+            if (
+                str(current["execution_id"]) != str(execution_id)
+                or current["state"] not in {"created", "running"}
+                or str(task_metadata.get("execution_id")) != str(execution_id)
+            ):
+                connection.rollback()
+                return False
+            updated_execution = connection.execute(
+                "UPDATE execution_attempts SET state='ambiguous', finished_at=?, error=? WHERE execution_id=? AND fencing_token=? AND state IN ('created','running') AND fencing_token=(SELECT MAX(fencing_token) FROM execution_attempts WHERE task_id=?)",
+                (timestamp, error, execution_id, int(current["fencing_token"]), task_id),
+            )
+            if updated_execution.rowcount != 1:
+                connection.rollback()
+                return False
+            updated_task = connection.execute(
+                "UPDATE tasks SET status='failed', completed_at=?, error=?, metadata_json=? WHERE id=? AND status='running'",
+                (timestamp, error, metadata_json, task_id),
+            )
+            if updated_task.rowcount != 1:
+                connection.rollback()
+                return False
+            connection.execute(
+                "INSERT INTO task_events (task_id, created_at, event_type, status, detail_json) VALUES (?, ?, ?, ?, ?)",
+                (task_id, timestamp, "orphaned_execution_failed", "failed", json.dumps({"execution_id": execution_id, "fencing_token": int(current["fencing_token"])}, ensure_ascii=False)),
+            )
+            connection.commit()
+            return True
+
     def list_attempts(self, task_id: str, *, limit: int = 100) -> list[dict[str, Any]]:
         limit = max(1, min(int(limit), 500))
         with self._lock, self._connect() as connection:
