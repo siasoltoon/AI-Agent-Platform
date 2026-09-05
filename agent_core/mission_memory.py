@@ -28,10 +28,13 @@ class MissionMemory:
     mission_budget: dict[str, Any] = field(default_factory=dict)
     active_task: str = ""
     active_execution_id: str = ""
+    active_execution_status: str = ""
+    active_execution_error: str = ""
     checkpoint_sequence: int = 0
     event_sequence: int = 0
 
     VALID_STATUSES = {"pending", "running", "completed", "blocked", "cancelled", "interrupted"}
+    EXECUTION_STATUSES = {"", "running", "interrupted", "ambiguous", "committed"}
     TERMINAL_STATUSES = {"completed", "cancelled"}
     ALLOWED_TRANSITIONS = {
         "pending": {"running", "cancelled", "interrupted", "blocked"},
@@ -47,6 +50,8 @@ class MissionMemory:
             raise ValueError("mission_id and objective are required")
         if self.status not in self.VALID_STATUSES:
             raise ValueError(f"Invalid mission status: {self.status}")
+        if self.active_execution_status not in self.EXECUTION_STATUSES:
+            raise ValueError(f"Invalid active execution status: {self.active_execution_status}")
         self.checkpoint_sequence = max(0, int(self.checkpoint_sequence))
         self.event_sequence = max(0, int(self.event_sequence))
 
@@ -81,17 +86,37 @@ class MissionMemory:
             raise ValueError("task_id and execution_id are required")
         self.active_task = task_id
         self.active_execution_id = execution_id
+        self.active_execution_status = "running"
+        self.active_execution_error = ""
+
+    def mark_execution_interrupted(self, error: str = "") -> None:
+        """Record that external execution stopped before a verified outcome was committed."""
+        if not self.active_execution_id:
+            return
+        self.active_execution_status = "interrupted"
+        self.active_execution_error = str(error)
+
+    def mark_execution_ambiguous(self, reason: str = "") -> None:
+        """Record an outcome that may have caused side effects but lacks verified completion."""
+        if not self.active_execution_id:
+            return
+        self.active_execution_status = "ambiguous"
+        self.active_execution_error = str(reason)
 
     def commit_execution(self, *, task_id: str, execution_id: str, result: dict[str, Any]) -> None:
         """Record a verified execution before graph state is advanced."""
         if self.active_task != task_id or self.active_execution_id != execution_id:
             raise ValueError("Execution checkpoint does not match the active execution")
         self.record_execution(result)
+        self.active_execution_status = "committed"
+        self.active_execution_error = ""
         self.checkpoint(step_id=task_id, summary="verified execution committed; safe to advance task graph", evidence={"execution_id": execution_id, "verified": True})
 
     def clear_execution(self) -> None:
         self.active_task = ""
         self.active_execution_id = ""
+        self.active_execution_status = ""
+        self.active_execution_error = ""
 
     def record_failure(self, step_id: str, error: str) -> None:
         self.failures.append(f"{step_id}: {error}")
@@ -117,12 +142,39 @@ class MissionMemory:
 class MissionMemoryStore:
     """Adapter around an optional durable store; memory remains usable without one."""
 
+    _EXECUTION_RANK = {"": 0, "running": 1, "interrupted": 2, "ambiguous": 3, "committed": 4}
+
     def __init__(self, store: Any | None = None):
         self.store = store
         self._memory: dict[str, dict[str, Any]] = {}
 
+    def _durable_payload(self, mission_id: str) -> dict[str, Any] | None:
+        if self.store is None:
+            return None
+        if hasattr(self.store, "load_mission"):
+            return self.store.load_mission(mission_id)
+        if hasattr(self.store, "load"):
+            return self.store.load(mission_id)
+        return None
+
     def save(self, memory: MissionMemory) -> None:
         payload = memory.snapshot()
+        existing = self._durable_payload(memory.mission_id)
+        if existing:
+            existing_id = str(existing.get("active_execution_id", ""))
+            incoming_id = str(payload.get("active_execution_id", ""))
+            if existing_id and existing_id == incoming_id:
+                existing_status = str(existing.get("active_execution_status", ""))
+                incoming_status = str(payload.get("active_execution_status", ""))
+                if self._EXECUTION_RANK.get(existing_status, 0) > self._EXECUTION_RANK.get(incoming_status, 0):
+                    payload["active_execution_status"] = existing_status
+                    payload["active_execution_error"] = existing.get("active_execution_error", "")
+                    if existing.get("last_execution"):
+                        payload["last_execution"] = existing["last_execution"]
+                    if existing.get("execution_evidence"):
+                        payload["execution_evidence"] = existing["execution_evidence"]
+                    payload["checkpoints"] = existing.get("checkpoints", payload.get("checkpoints", []))
+                    payload["checkpoint_sequence"] = int(existing.get("checkpoint_sequence", payload.get("checkpoint_sequence", 0)))
         if self.store is not None:
             if hasattr(self.store, "save_mission"):
                 self.store.save_mission(memory.mission_id, payload)
@@ -131,12 +183,7 @@ class MissionMemoryStore:
         self._memory[memory.mission_id] = payload
 
     def load(self, mission_id: str) -> MissionMemory | None:
-        payload = None
-        if self.store is not None:
-            if hasattr(self.store, "load_mission"):
-                payload = self.store.load_mission(mission_id)
-            elif hasattr(self.store, "load"):
-                payload = self.store.load(mission_id)
+        payload = self._durable_payload(mission_id)
         if payload is None:
             payload = self._memory.get(mission_id)
         if not payload:
@@ -160,6 +207,8 @@ class MissionMemoryStore:
             mission_budget=dict(payload.get("mission_budget", {})),
             active_task=str(payload.get("active_task", "")),
             active_execution_id=str(payload.get("active_execution_id", "")),
+            active_execution_status=str(payload.get("active_execution_status", "")),
+            active_execution_error=str(payload.get("active_execution_error", "")),
             checkpoint_sequence=int(payload.get("checkpoint_sequence", 0)),
             event_sequence=int(payload.get("event_sequence", 0)),
         )
