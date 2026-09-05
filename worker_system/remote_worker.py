@@ -16,11 +16,7 @@ class RemoteExecutionLedger:
     """ExecutionLedger-compatible fence facade backed by the controller."""
 
     def __init__(self, _path: str = "") -> None:
-        self.authority = RemoteExecutionAuthority(
-            EXECUTION_AUTHORITY_URL,
-            token=EXECUTION_AUTHORITY_TOKEN,
-            timeout=EXECUTION_AUTHORITY_TIMEOUT,
-        )
+        self.authority = RemoteExecutionAuthority(EXECUTION_AUTHORITY_URL, token=EXECUTION_AUTHORITY_TOKEN, timeout=EXECUTION_AUTHORITY_TIMEOUT)
         self.path = EXECUTION_AUTHORITY_URL
 
     def fence_check(self, task_id: str, execution_id: str, fencing_token: int) -> bool:
@@ -31,11 +27,7 @@ class RemoteSideEffectLedger:
     """SideEffectLedger-compatible facade backed by the controller."""
 
     def __init__(self, _path: str = "") -> None:
-        self.authority = RemoteExecutionAuthority(
-            EXECUTION_AUTHORITY_URL,
-            token=EXECUTION_AUTHORITY_TOKEN,
-            timeout=EXECUTION_AUTHORITY_TIMEOUT,
-        )
+        self.authority = RemoteExecutionAuthority(EXECUTION_AUTHORITY_URL, token=EXECUTION_AUTHORITY_TOKEN, timeout=EXECUTION_AUTHORITY_TIMEOUT)
         self.path = EXECUTION_AUTHORITY_URL
 
     request_hash = staticmethod(RemoteExecutionAuthority.request_hash)
@@ -50,28 +42,15 @@ class RemoteSideEffectLedger:
         record = self.get(idempotency_key)
         if record is None:
             return False
-        return self.authority.commit(
-            idempotency_key,
-            result=result,
-            now=now,
-            execution_id=record.get("execution_id"),
-            fencing_token=int(record.get("fencing_token", -1)),
-        )
+        return self.authority.commit(idempotency_key, result=result, now=now, execution_id=record.get("execution_id"), fencing_token=int(record.get("fencing_token", -1)))
 
-    def transition(self, idempotency_key: str, state: str, *, error=None, now=None, execution_id=None, fencing_token=None):
-        return self.authority.transition(
-            idempotency_key,
-            state,
-            error=error,
-            now=now,
-            execution_id=execution_id,
-            fencing_token=fencing_token,
-        )
+    def transition(self, idempotency_key: str, state: str, *, error=None, now=None):
+        record = self.get(idempotency_key)
+        if record is None:
+            return False
+        return self.authority.transition(idempotency_key, state, error=error, now=now, execution_id=record.get("execution_id"), fencing_token=int(record.get("fencing_token", -1)))
 
 
-# The existing Worker implementation resolves these names when execute() runs.
-# Rebinding them here preserves all worker behavior while moving authoritative
-# fencing and durable side-effect state to the controller process/database.
 base_worker.ExecutionLedger = RemoteExecutionLedger
 base_worker.SideEffectLedger = RemoteSideEffectLedger
 
