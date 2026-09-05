@@ -56,6 +56,24 @@ class RecoverySweep:
             execution_id = stale_lease.get("execution_id") if stale_lease else task.get("metadata", {}).get("execution_id")
             attempt = self.execution_ledger.get(str(execution_id)) if execution_id else None
 
+            # A stale lease is authoritative about the execution identity even
+            # when the lease predates ledger persistence. Materialize that
+            # identity instead of inventing a different attempt.
+            if execution_id is not None and attempt is None:
+                current_attempt = self.execution_ledger.current(task_id)
+                if current_attempt is None:
+                    attempt = self.execution_ledger.begin(
+                        task_id,
+                        "recovery-sweep",
+                        execution_id=str(execution_id),
+                        now=current,
+                    )
+                elif str(current_attempt["execution_id"]) == str(execution_id):
+                    attempt = current_attempt
+                else:
+                    # A newer fenced attempt already exists; do not mutate it.
+                    attempt = current_attempt
+
             # Legacy tasks may predate the execution ledger and have no durable
             # execution identity. Establish a recovery-owned attempt before
             # failing them, so the terminal transition remains ledger-fenced.
