@@ -18,27 +18,29 @@ def test_execution_budget_rejects_invalid_limits():
             raise AssertionError(f"invalid budget accepted: {kwargs}")
 
 
-def test_execution_evidence_tracks_tools_timeouts_and_ambiguity():
+def test_execution_evidence_tracks_tools_timeouts_ambiguity_and_security():
     evidence = ExecutionEvidence()
-    evidence.step_count = 3
+    evidence.step_count = 4
     evidence.record_tool("terminal", {"ok": True}, output_chars=100)
     evidence.record_tool("terminal", {"ok": False, "timed_out": True}, output_chars=50, truncated=True)
     evidence.record_tool("terminal", {"ok": False, "outcome": "ambiguous"}, output_chars=25)
+    evidence.record_tool("write_file", {"ok": False, "error_type": "PermissionError"}, output_chars=10)
     evidence.record_retry()
     evidence.record_recovery()
 
     snapshot = evidence.snapshot()
-    assert snapshot["step_count"] == 3
-    assert snapshot["tool_calls"] == 3
+    assert snapshot["step_count"] == 4
+    assert snapshot["tool_calls"] == 4
     assert snapshot["successful_tool_calls"] == 1
-    assert snapshot["failed_tool_calls"] == 2
+    assert snapshot["failed_tool_calls"] == 3
     assert snapshot["timeout_count"] == 1
     assert snapshot["ambiguous_outcomes"] == 1
-    assert snapshot["output_chars"] == 175
+    assert snapshot["security_violations"] == 1
+    assert snapshot["output_chars"] == 185
     assert snapshot["output_truncations"] == 1
     assert snapshot["retries"] == 1
     assert snapshot["recovery_attempts"] == 1
-    assert snapshot["tool_outcomes"] == {"terminal": 3}
+    assert snapshot["tool_outcomes"] == {"terminal": 3, "write_file": 1}
 
 
 def test_execution_budget_reports_first_exceeded_boundary():
@@ -51,10 +53,11 @@ def test_execution_budget_reports_first_exceeded_boundary():
 def test_enrich_execution_evidence_uses_real_tool_records():
     result = {
         "status": "completed",
-        "steps": [{"step": 1}, {"step": 2}],
+        "steps": [{"step": 1}, {"step": 2}, {"step": 3}],
         "tool_records": [
             {"step": 1, "tool": "write_file", "ok": True, "result": {"path": "a.txt", "content": "ok"}},
             {"step": 2, "tool": "terminal", "ok": False, "result": {"timed_out": True, "command": "pytest"}, "output_truncated": True},
+            {"step": 3, "tool": "read_file", "ok": False, "error_type": "PermissionError", "error": "Path escapes workspace"},
         ],
         "execution_evidence": {"verified": True},
     }
@@ -62,15 +65,16 @@ def test_enrich_execution_evidence_uses_real_tool_records():
     enriched = enrich_execution_evidence(result, started_at=ExecutionEvidence().started_at, recovery_attempts=2, retries=1)
     evidence = enriched["execution_evidence"]
     assert evidence["verified"] is True
-    assert evidence["step_count"] == 2
-    assert evidence["tool_calls"] == 2
+    assert evidence["step_count"] == 3
+    assert evidence["tool_calls"] == 3
     assert evidence["successful_tool_calls"] == 1
-    assert evidence["failed_tool_calls"] == 1
+    assert evidence["failed_tool_calls"] == 2
     assert evidence["timeout_count"] == 1
+    assert evidence["security_violations"] == 1
     assert evidence["output_truncations"] == 1
     assert evidence["recovery_attempts"] == 2
     assert evidence["retries"] == 1
-    assert evidence["tool_outcomes"] == {"write_file": 1, "terminal": 1}
+    assert evidence["tool_outcomes"] == {"write_file": 1, "terminal": 1, "read_file": 1}
 
 
 def test_verify_execution_rejects_inconsistent_evidence_counts():
@@ -100,3 +104,25 @@ def test_verify_execution_rejects_policy_violation():
     verification = verify_execution(result)
     assert not verification.verified
     assert "policy_compliant" in verification.blockers
+
+
+def test_verify_execution_rejects_security_violation_even_when_model_claims_success():
+    result = {
+        "status": "completed",
+        "execution_evidence": {
+            "verified": True,
+            "security_violations": 1,
+            "policy": {"compliant": True},
+            "tool_calls": 1,
+            "successful_tool_calls": 0,
+        },
+        "tool_records": [{
+            "tool": "read_file",
+            "ok": False,
+            "error_type": "PermissionError",
+            "error": "Path escapes the configured workspace.",
+        }],
+    }
+    verification = verify_execution(result)
+    assert not verification.verified
+    assert "security_clean" in verification.blockers
