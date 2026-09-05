@@ -17,6 +17,7 @@ from backend.api import tasks
 from backend.api import workers
 from backend.recovery_sweep import RecoverySweep
 from backend.safe_task_runner import SafeTaskRunner
+from backend.storage.execution_ledger import ExecutionLedger
 from backend.storage.worker_lease_store import WorkerLeaseStore
 from backend.task_runner import DEFAULT_POLL_SECONDS
 from config.production_config import CONFIG
@@ -28,6 +29,7 @@ DASHBOARD_DIR = BASE_DIR / "dashboard"
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     lease_store = WorkerLeaseStore(tasks.TASK_STORE.path)
+    execution_ledger = ExecutionLedger(tasks.TASK_STORE.path)
     recovery_sweep = RecoverySweep(
         tasks.TASK_STORE,
         lease_store,
@@ -40,6 +42,7 @@ async def lifespan(_: FastAPI):
         shutdown_timeout_seconds=CONFIG.shutdown_timeout_seconds,
         lease_store=lease_store,
         recovery_sweep=recovery_sweep,
+        execution_ledger=execution_ledger,
     )
     tasks.TASK_RUNNER = runner
     runner.start()
