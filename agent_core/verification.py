@@ -45,6 +45,21 @@ def classify_failure(error: BaseException | str) -> FailureClass:
     return FailureClass.UNKNOWN
 
 
+def _record_is_security_violation(record: Any) -> bool:
+    if not isinstance(record, dict):
+        return False
+    if record.get("policy_violation") is True or record.get("security_violation") is True:
+        return True
+    if record.get("error_type") in {"PermissionError", "MissionPolicyViolation", "SecurityViolation"}:
+        return True
+    payload = record.get("result")
+    return isinstance(payload, dict) and (
+        payload.get("policy_violation") is True
+        or payload.get("security_violation") is True
+        or payload.get("error_type") in {"PermissionError", "MissionPolicyViolation", "SecurityViolation"}
+    )
+
+
 def verify_execution(result: dict[str, Any]) -> VerificationResult:
     """Verify completion from independent execution records, not model claims alone."""
     valid_result = isinstance(result, dict)
@@ -53,6 +68,7 @@ def verify_execution(result: dict[str, Any]) -> VerificationResult:
     valid_records = isinstance(records, list)
     record_items = records if valid_records else []
     successful = [item for item in record_items if isinstance(item, dict) and item.get("ok") is True]
+    observed_security_violations = sum(1 for item in record_items if _record_is_security_violation(item))
 
     checks = {
         "completed": valid_result and result.get("status") == "completed",
@@ -75,6 +91,9 @@ def verify_execution(result: dict[str, Any]) -> VerificationResult:
             and evidence.get("policy", {}).get("compliant") is not False
             if isinstance(evidence, dict) and isinstance(evidence.get("policy", {}), dict)
             else True
+        ),
+        "security_clean": observed_security_violations == 0 and (
+            not isinstance(evidence, dict) or int(evidence.get("security_violations", 0)) == 0
         ),
     }
     blockers = [name for name, passed in checks.items() if not passed]
