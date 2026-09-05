@@ -227,7 +227,7 @@ class Worker:
         except Exception as exc:
             self.last_error = str(exc)
             self._release_task_id(task_id)
-            logger.warning("Task execution exiting with error task_id=%s error_type=%s cancel_to_error_ms=%.1f total_elapsed_ms=%.1f", task_id, type(exc).__name__, self._cancel_elapsed_ms(task_id) if self._cancel_elapsed_ms(task_id) is not None else -1.0, (time.monotonic() - execution_started) * 1000, exc)
+            logger.warning("Task execution exiting with error task_id=%s error_type=%s cancel_to_error_ms=%.1f total_elapsed_ms=%.1f error=%s", task_id, type(exc).__name__, self._cancel_elapsed_ms(task_id) if self._cancel_elapsed_ms(task_id) is not None else -1.0, (time.monotonic() - execution_started) * 1000, exc)
             raise
         finally:
             cleanup_started = time.monotonic()
