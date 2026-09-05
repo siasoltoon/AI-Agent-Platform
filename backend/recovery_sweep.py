@@ -55,13 +55,6 @@ class RecoverySweep:
             stale_lease = stale_by_task.get(task_id)
             execution_id = stale_lease.get("execution_id") if stale_lease else task.get("metadata", {}).get("execution_id")
             attempt = self.execution_ledger.get(str(execution_id)) if execution_id else None
-            if attempt and attempt.get("state") in {"created", "running"}:
-                self.execution_ledger.transition(
-                    str(execution_id),
-                    "ambiguous",
-                    error="Execution owner disappeared or lease expired during recovery.",
-                    now=current,
-                )
 
             metadata = dict(task.get("metadata", {}))
             metadata.update(
@@ -74,23 +67,39 @@ class RecoverySweep:
                     "recovered_at": current,
                 }
             )
-            updated = self.task_store.update(
-                task_id,
-                status="failed",
-                completed_at=current,
-                error="Execution owner disappeared or lease expired; automatic replay is unsafe.",
-                metadata=metadata,
-            )
-            actions.append(
-                {
-                    "task_id": task_id,
-                    "action": "orphaned_execution_failed",
-                    "task_status": updated["status"],
-                    "safe": True,
-                    "execution_id": execution_id,
-                    "execution_state": attempt.get("state") if attempt else None,
-                }
-            )
+            if execution_id:
+                failed = self.execution_ledger.fail_orphaned_if_current(
+                    task_id,
+                    str(execution_id),
+                    error="Execution owner disappeared or lease expired; automatic replay is unsafe.",
+                    metadata=metadata,
+                    now=current,
+                )
+            else:
+                failed = False
+
+            if failed:
+                actions.append(
+                    {
+                        "task_id": task_id,
+                        "action": "orphaned_execution_failed",
+                        "task_status": "failed",
+                        "safe": True,
+                        "execution_id": execution_id,
+                        "execution_state": "ambiguous",
+                    }
+                )
+            else:
+                refreshed = self.task_store.get(task_id)
+                actions.append(
+                    {
+                        "task_id": task_id,
+                        "action": "orphan_recovery_skipped_stale_fence",
+                        "task_status": refreshed["status"] if refreshed else None,
+                        "safe": True,
+                        "execution_id": execution_id,
+                    }
+                )
 
         return {
             "stale_leases": len(stale),
