@@ -23,6 +23,10 @@
 - Terminal دارای allowlist و blocked-operation guard است.
 - Git و toolchainهای توسعه برای عملیات واقعی در Worker در دسترس هستند.
 - Dashboard از endpointهای task و agent status استفاده می‌کند و CORS صریح است.
+- هر execution یک شناسه پایدار و fencing token یکتا دارد و فقط جدیدترین execution می‌تواند completion را ثبت کند.
+- stale worker نمی‌تواند پس از supersede شدن، completion یا side effect جدید را به‌صورت durable ثبت کند.
+- side effectها با idempotency key پایدار ثبت می‌شوند؛ نتیجه committed دوباره اجرا نمی‌شود.
+- side effect مبهم (`ambiguous`) به‌صورت خودکار replay نمی‌شود و باید صریحاً recover شود.
 
 ## مسیر عملیاتی نهایی
 
@@ -37,6 +41,8 @@ SQLite Task Store
    ↓
 Task Runner / Claim / Recovery / Cancellation
    ↓
+Execution Ledger + Fencing
+   ↓
 Agent Runtime
    ↓
 PC Worker
@@ -45,17 +51,19 @@ Ollama
    ↓
 Agent Executor
    ↓
+Execution Fence
+   ↓
 Tool Registry
-   ├── filesystem tools
-   └── controlled terminal/toolchain
+   ├── filesystem tools + side-effect ledger
+   └── controlled terminal/toolchain + process fence
    ↓
 Observable execution
    ↓
 Verification / Evidence
    ↓
-TaskStore terminal state
+Fenced TaskStore terminal state
    ↓
-Dashboard
+Dashboard / Execution Diagnostics
 ```
 
 ## Gateهای اجباری
@@ -70,6 +78,10 @@ Dashboard
 8. restart Worker/Controller نباید Taskهای running را گم کند.
 9. cancellation نباید با completion دیررس Worker overwrite شود.
 10. Task ID تکراری باید reject شود.
+11. دو execution متوالی برای یک Task باید fencing را رعایت کنند و execution قدیمی نباید commit کند.
+12. side effectی که بعد از `begin` و قبل از `commit` با crash مواجه شده، باید `ambiguous` شود و replay خودکار نشود.
+13. side effect committed باید از ledger replay شود و دوباره عملیات خارجی را اجرا نکند.
+14. Dashboard باید در صورت unavailable بودن execution ledger وضعیت `fail/offline` بدهد و هرگز آن را healthy گزارش نکند.
 
 ## Definition of Done
 
