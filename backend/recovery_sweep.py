@@ -6,6 +6,7 @@ import time
 from typing import Any
 
 from agent_core.mission_reconciliation import MissionReconciler
+from backend.storage.execution_ledger import ExecutionLedger
 from backend.storage.task_store import TaskStore
 from backend.storage.worker_lease_store import WorkerLeaseStore
 
@@ -13,10 +14,17 @@ from backend.storage.worker_lease_store import WorkerLeaseStore
 class RecoverySweep:
     """Repair only states that are provably safe; never blindly replay orphaned work."""
 
-    def __init__(self, task_store: TaskStore, lease_store: WorkerLeaseStore, reconciler: MissionReconciler | None = None) -> None:
+    def __init__(
+        self,
+        task_store: TaskStore,
+        lease_store: WorkerLeaseStore,
+        reconciler: MissionReconciler | None = None,
+        execution_ledger: ExecutionLedger | None = None,
+    ) -> None:
         self.task_store = task_store
         self.lease_store = lease_store
         self.reconciler = reconciler
+        self.execution_ledger = execution_ledger or ExecutionLedger(task_store.path)
 
     @staticmethod
     def _professional(task: dict[str, Any]) -> bool:
@@ -45,7 +53,16 @@ class RecoverySweep:
                     continue
 
             stale_lease = stale_by_task.get(task_id)
-            execution_id = stale_lease.get("execution_id") if stale_lease else None
+            execution_id = stale_lease.get("execution_id") if stale_lease else task.get("metadata", {}).get("execution_id")
+            attempt = self.execution_ledger.get(str(execution_id)) if execution_id else None
+            if attempt and attempt.get("state") in {"created", "running"}:
+                self.execution_ledger.transition(
+                    str(execution_id),
+                    "ambiguous",
+                    error="Execution owner disappeared or lease expired during recovery.",
+                    now=current,
+                )
+
             metadata = dict(task.get("metadata", {}))
             metadata.update(
                 {
@@ -53,6 +70,7 @@ class RecoverySweep:
                     "automatic_retry_suppressed": True,
                     "orphaned_execution": True,
                     "orphaned_execution_id": execution_id,
+                    "orphaned_execution_state": attempt.get("state") if attempt else None,
                     "recovered_at": current,
                 }
             )
@@ -70,6 +88,7 @@ class RecoverySweep:
                     "task_status": updated["status"],
                     "safe": True,
                     "execution_id": execution_id,
+                    "execution_state": attempt.get("state") if attempt else None,
                 }
             )
 
