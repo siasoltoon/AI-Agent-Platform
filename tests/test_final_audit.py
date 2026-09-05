@@ -21,6 +21,13 @@ def test_completion_contract():
     assert not audit.audit_completion_contract(status="completed", verified=False, blockers=[]).passed
 
 
+def test_execution_contract():
+    assert FinalPlatformAudit.audit_execution_contract(execution_state="committed", task_status="completed", fenced=True).passed
+    assert not FinalPlatformAudit.audit_execution_contract(execution_state="committed", task_status="running", fenced=True).passed
+    assert not FinalPlatformAudit.audit_execution_contract(execution_state="committed", task_status="completed", fenced=False).passed
+    assert not FinalPlatformAudit.audit_execution_contract(execution_state="running", task_status="completed", fenced=True).passed
+
+
 def test_acceptance_requires_terminal_completed_status():
     gate = MissionAcceptanceGate()
     result = gate.evaluate(
