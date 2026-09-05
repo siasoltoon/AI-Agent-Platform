@@ -31,6 +31,8 @@ This document defines the engineering direction for heavy autonomous software mi
 - Evidence counters are cross-checked against actual tool records before acceptance.
 - Security, reliability, performance, and maintainability are treated as execution concerns, not post-processing.
 - Terminal missions clear stale active-execution identity only after the terminal state is reached, while retaining a checkpoint that records the finalization event.
+- Lifecycle events are durably ordered in mission memory, allowing audit, diagnostics, and resume tooling to reconstruct the orchestrator's phase history.
+- Event persistence occurs before an external event sink is notified, so observability consumers cannot become the source of truth or prevent durable history from being recorded.
 - The platform should prefer deterministic gates for safety-critical decisions and use the model for planning, implementation, diagnosis, and adaptation.
 
 ## Current architecture
@@ -52,5 +54,7 @@ Mission execution parameters (`model`, `timeout_seconds`, and metadata) are pass
 Acceptance exposes network capability compliance as an explicit gate in addition to verification, making capability failures visible as a deterministic acceptance reason rather than an implicit side effect of a generic verification failure.
 
 Terminal checkpoint finalization is performed by the orchestrator after the developer reaches `completed` or `cancelled`. The final checkpoint preserves the active execution ID for auditability, then the active execution fields are cleared so a terminal mission cannot be mistaken for an interrupted in-flight execution on a later resume.
+
+The orchestrator also persists an ordered lifecycle event stream (`contract -> recon -> plan -> execute -> verify -> accept -> terminal`) inside the same mission memory record. This is intentionally a compact audit history rather than a replacement for execution evidence: tool records and verification remain authoritative for what actually happened.
 
 The architecture is intentionally incremental. Each hardening stage must preserve the existing production path and add executable evidence rather than creating parallel fake implementations.
