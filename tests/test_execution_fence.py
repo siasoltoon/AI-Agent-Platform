@@ -53,7 +53,6 @@ def test_side_effect_rejects_request_hash_mismatch(tmp_path):
     ledger.begin("task-1", "worker-1", execution_id="exec-1")
     fence = ExecutionFence(task_id="task-1", execution_id="exec-1", fencing_token=1, ledger=ledger, side_effects=effects)
     key, _ = fence.begin_side_effect("write_file", {"path": "a.txt", "content": "hello"})
-    effects._connect
     with sqlite3.connect(db) as connection:
         connection.execute("UPDATE side_effects SET request_hash=? WHERE idempotency_key=?", ("tampered", key))
         connection.commit()
