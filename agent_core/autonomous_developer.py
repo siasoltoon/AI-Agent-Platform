@@ -143,12 +143,29 @@ class AutonomousDeveloper:
         self.memory_store.save(memory)
         return {"mission_id": memory.mission_id, "status": "blocked", "failure_class": "budget", "reason": reason, "memory": memory.snapshot()}
 
-    def run(self, mission_id: str, objective: str, max_retries: int = 3) -> dict[str, Any]:
+    def run(
+        self,
+        mission_id: str,
+        objective: str,
+        max_retries: int = 3,
+        *,
+        runtime: Any | None = None,
+        model: str | None = None,
+        timeout_seconds: int | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Run a mission with an optional per-run runtime and execution overrides.
+
+        The runtime argument is local to this invocation, avoiding shared mutable
+        runtime replacement when a developer instance serves concurrent missions.
+        """
         if not mission_id.strip() or not objective.strip():
             raise ValueError("mission_id and objective are required")
         retries = max(1, min(int(max_retries), 5))
         objective = objective.strip()
         contract = MissionContract.from_objective(objective)
+        execution_runtime = runtime or self.runtime
+        mission_metadata = dict(metadata or {})
         memory = self.memory_store.load(mission_id)
         if memory is None:
             memory = MissionMemory(mission_id, objective)
@@ -208,22 +225,28 @@ class AutonomousDeveloper:
                     limits = budget.execution_limits()
                     memory.checkpoint(step_id=task.task_id, summary=f"attempt {attempt}", evidence={"budget": budget.snapshot(), "execution_limits": limits, "mission_contract": contract.snapshot()})
                     self.memory_store.save(memory)
+                    execution_metadata = {
+                        "mission_id": mission_id,
+                        "mission_task": task.task_id,
+                        "max_agent_steps": limits["max_agent_steps"],
+                        "max_output_chars": limits["max_output_chars"],
+                        "execution_profile": "large",
+                        "mission_budget": budget.snapshot(),
+                        "mission_contract": contract.snapshot(),
+                        "network_access": contract.network_access,
+                    }
+                    execution_metadata.update(mission_metadata)
+                    execution_metadata["mission_contract"] = contract.snapshot()
+                    execution_metadata["network_access"] = contract.network_access
+                    execution_kwargs: dict[str, Any] = {
+                        "task_id": f"{mission_id}:{task.task_id}:{attempt}",
+                        "timeout_seconds": min(int(timeout_seconds), limits["timeout_seconds"]) if timeout_seconds is not None else limits["timeout_seconds"],
+                        "metadata": execution_metadata,
+                    }
+                    if model is not None:
+                        execution_kwargs["model"] = model
                     try:
-                        result = self.runtime.execute(
-                            prompt,
-                            task_id=f"{mission_id}:{task.task_id}:{attempt}",
-                            timeout_seconds=limits["timeout_seconds"],
-                            metadata={
-                                "mission_id": mission_id,
-                                "mission_task": task.task_id,
-                                "max_agent_steps": limits["max_agent_steps"],
-                                "max_output_chars": limits["max_output_chars"],
-                                "execution_profile": "large",
-                                "mission_budget": budget.snapshot(),
-                                "mission_contract": contract.snapshot(),
-                                "network_access": contract.network_access,
-                            },
-                        )
+                        result = execution_runtime.execute(prompt, **execution_kwargs)
                         cancelled = self._cancelled_snapshot(mission_id)
                         if cancelled:
                             return cancelled
