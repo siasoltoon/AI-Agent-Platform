@@ -1,3 +1,4 @@
+from agent_core.checkpointed_runtime import CheckpointedRuntime
 from agent_core.mission_memory import MissionMemoryStore
 from agent_core.mission_orchestrator import MissionOrchestrator, MissionPhase
 
@@ -13,8 +14,10 @@ class FakeDeveloper:
         self.runtime = FakeRuntime()
         self.memory_store = MissionMemoryStore()
 
-    def run(self, mission_id, objective, max_retries=3):
-        self.calls.append(("run", mission_id, objective, max_retries))
+    def run(self, mission_id, objective, max_retries=3, **kwargs):
+        self.calls.append(("run", mission_id, objective, max_retries, kwargs))
+        assert isinstance(kwargs["runtime"], CheckpointedRuntime)
+        assert kwargs["runtime"].runtime is self.runtime
         return {
             "mission_id": mission_id,
             "status": "completed",
@@ -36,7 +39,8 @@ def test_orchestrator_emits_contract_and_terminal_lifecycle():
 
     assert result["status"] == "completed"
     assert result["mission_contract"]["requires_tests"] is True
-    assert developer.calls == [("run", "m1", "Implement a new authentication feature", 2)]
+    assert developer.calls[0][:4] == ("run", "m1", "Implement a new authentication feature", 2)
+    assert developer.runtime.__class__ is FakeRuntime
     assert [event.phase for event in events] == [
         MissionPhase.CONTRACT,
         MissionPhase.RECON,
@@ -46,6 +50,25 @@ def test_orchestrator_emits_contract_and_terminal_lifecycle():
         MissionPhase.ACCEPT,
         MissionPhase.COMPLETE,
     ]
+
+
+def test_orchestrator_propagates_execution_controls_without_mutating_developer():
+    developer = FakeDeveloper()
+    orchestrator = MissionOrchestrator(developer)
+
+    orchestrator.run(
+        "m-controls",
+        "Implement a feature",
+        model="test-model",
+        timeout_seconds=123,
+        metadata={"network_access": "restricted"},
+    )
+
+    kwargs = developer.calls[0][4]
+    assert kwargs["model"] == "test-model"
+    assert kwargs["timeout_seconds"] == 123
+    assert kwargs["metadata"]["network_access"] == "restricted"
+    assert developer.runtime.__class__ is FakeRuntime
 
 
 def test_orchestrator_cancel_delegates_and_emits_terminal_event():
