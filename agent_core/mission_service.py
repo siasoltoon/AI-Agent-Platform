@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from agent_core.autonomous_developer import AutonomousDeveloper
+from agent_core.mission_memory import MissionMemory
 from agent_core.mission_orchestrator import MissionOrchestrator
 from agent_core.runtime import AgentRuntime
 
@@ -60,5 +61,8 @@ class MissionService:
         snapshot["events_truncated"] = len(memory.events) > event_limit
         return snapshot
 
-    def cancel(self, task_id: str) -> dict[str, Any]:
+    def cancel(self, task_id: str, *, objective: str | None = None) -> dict[str, Any]:
+        """Cancel a mission and persist its terminal event even if execution never started."""
+        if objective and self.developer.memory_store.load(task_id) is None:
+            self.developer.memory_store.save(MissionMemory(task_id, objective))
         return self.orchestrator.cancel(task_id)
