@@ -14,6 +14,7 @@ This document defines the engineering direction for heavy autonomous software mi
 8. **Recovery** — classify failures and repair root causes before retrying.
 9. **Acceptance** — complete only when the mission contract and evidence gates pass.
 10. **Persistence** — checkpoint state so interrupted missions can resume without blindly repeating completed work.
+11. **Finalization** — after a terminal completed/cancelled state is durably reached, clear the active execution identity while preserving the final checkpoint evidence.
 
 ## Engineering principles
 
@@ -29,6 +30,7 @@ This document defines the engineering direction for heavy autonomous software mi
 - Testing is requirement-aware: code changes require test evidence; documentation-only work does not get blocked by an unrelated test requirement.
 - Evidence counters are cross-checked against actual tool records before acceptance.
 - Security, reliability, performance, and maintainability are treated as execution concerns, not post-processing.
+- Terminal missions clear stale active-execution identity only after the terminal state is reached, while retaining a checkpoint that records the finalization event.
 - The platform should prefer deterministic gates for safety-critical decisions and use the model for planning, implementation, diagnosis, and adaptation.
 
 ## Current architecture
@@ -46,5 +48,9 @@ Network capability modes are ordered from most restrictive to least restrictive:
 A mission may request a mode at or below its contract mode. `native` additionally requires observable native containment evidence; if native containment cannot be established, execution is rejected instead of silently falling back to a weaker mode.
 
 Mission execution parameters (`model`, `timeout_seconds`, and metadata) are passed as invocation-local controls. Checkpointing wraps only that invocation's runtime, so concurrent missions cannot overwrite each other's runtime adapter.
+
+Acceptance exposes network capability compliance as an explicit gate in addition to verification, making capability failures visible as a deterministic acceptance reason rather than an implicit side effect of a generic verification failure.
+
+Terminal checkpoint finalization is performed by the orchestrator after the developer reaches `completed` or `cancelled`. The final checkpoint preserves the active execution ID for auditability, then the active execution fields are cleared so a terminal mission cannot be mistaken for an interrupted in-flight execution on a later resume.
 
 The architecture is intentionally incremental. Each hardening stage must preserve the existing production path and add executable evidence rather than creating parallel fake implementations.
