@@ -131,12 +131,14 @@ class MissionMemoryStore:
                 self.store.save(memory.mission_id, payload)
 
     def load(self, mission_id: str) -> MissionMemory | None:
-        payload = self._memory.get(mission_id)
-        if payload is None and self.store is not None:
+        payload = None
+        if self.store is not None:
             if hasattr(self.store, "load_mission"):
                 payload = self.store.load_mission(mission_id)
             elif hasattr(self.store, "load"):
                 payload = self.store.load(mission_id)
+        if payload is None:
+            payload = self._memory.get(mission_id)
         if not payload:
             return None
         return MissionMemory(
