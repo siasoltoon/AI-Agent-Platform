@@ -15,12 +15,15 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from agent_core.execution_agent import AgentExecutionError
+from agent_core.execution_fence import ExecutionFence
 from agent_core.network_capability import NetworkCapability, NetworkCapabilityError
 from agent_core.network_policy import NetworkPolicy
 from agent_core.reliable_executor import ReliableAgentExecutor
 from agent_core.worker_isolation import WorkerIsolationError, WorkerIsolationPolicy
 from backend.services.ollama_service import OllamaService
 from backend.services.telemetry import snapshot as resource_snapshot
+from backend.storage.execution_ledger import ExecutionLedger
+from backend.storage.side_effect_ledger import SideEffectLedger
 from config.worker_config import DEFAULT_MODEL, OLLAMA_HOST, WORKER_ISOLATION_ROOT, WORKER_TIMEOUT
 
 logger = logging.getLogger("ai_agent_worker")
@@ -186,22 +189,33 @@ class Worker:
             network_capability = contract_capability.authorize(requested_network_access)
             network_access = network_capability.mode
             network_policy = NetworkPolicy(mode=network_access)
-            capability_evidence = {
-                **contract_capability.snapshot(),
-                "requested_mode": requested_network_access or contract_capability.mode,
-                "authorized_mode": network_access,
-                "escalation_blocked": True,
-            }
+            capability_evidence = {**contract_capability.snapshot(), "requested_mode": requested_network_access or contract_capability.mode, "authorized_mode": network_access, "escalation_blocked": True}
             logger.info("Executing task_id=%s model=%s prompt_length=%s timeout=%s mode=agentic-reliable profile=%s max_agent_steps=%s workspace=%s isolation_root=%s network_access=%s network_contract=%s self_repair_attempts=%s", task_id, model, len(prompt), timeout, execution_profile, requested_steps, workspace, self.isolation_policy.root, network_access, contract_capability.mode, ReliableAgentExecutor.MAX_ATTEMPTS)
             service = OllamaService(base_url=OLLAMA_HOST, model=model, timeout=timeout, cancel_event=cancellation_event, use_isolated_cancellation_process=True)
             executor_kwargs = {"workspace_root": str(workspace), "max_steps": requested_steps}
             if "network_policy" in inspect.signature(AgentExecutor).parameters:
                 executor_kwargs["network_policy"] = network_policy
+
+            execution_fence = None
+            execution_id = metadata.get("execution_id")
+            fencing_token = metadata.get("fencing_token")
+            ledger_path = metadata.get("execution_ledger_path") or "data/tasks.db"
+            if execution_id and fencing_token is not None:
+                ledger = ExecutionLedger(ledger_path)
+                side_effects = SideEffectLedger(ledger_path)
+                execution_fence = ExecutionFence(task_id=task_id or str(metadata.get("task_id") or ""), execution_id=str(execution_id), fencing_token=int(fencing_token), ledger=ledger, side_effects=side_effects)
+                execution_fence.assert_current()
+                executor_kwargs["execution_fence"] = execution_fence
+                logger.info("Execution fence bound task_id=%s execution_id=%s fencing_token=%s ledger_path=%s", task_id, execution_id, fencing_token, ledger_path)
+            elif execution_id or fencing_token is not None:
+                raise RuntimeError("Execution fencing metadata is incomplete; refusing an unfenced execution.")
+
             executor = AgentExecutor(service, **executor_kwargs)
             result = executor.execute(prompt)
             if cancellation_event is not None and cancellation_event.is_set(): raise AgentExecutionError("Task execution was cancelled.")
             if result.get("status") != "completed" or not result.get("execution_evidence", {}).get("verified", False): raise AgentExecutionError("Agent execution completed without verified execution evidence.")
             result.setdefault("network_capability", capability_evidence)
+            result.setdefault("execution_fence", {"enabled": execution_fence is not None, "execution_id": execution_id, "fencing_token": fencing_token, "side_effects": "durable" if execution_fence is not None else "disabled"})
             self.last_completed_at = time.time()
             response = {"status": "completed", "worker_id": self.worker_id, "task_id": task_id, "model": model, "execution_profile": execution_profile, "max_agent_steps": requested_steps, "workspace": str(workspace), "isolation": self.isolation_policy.snapshot(), "network_policy": network_policy.snapshot(), "network_capability": capability_evidence, "result": result, "resource_snapshot": resource_snapshot(), "idempotency": {"key": task_id, "replayed": False}}
             self._store_result(task_id, response); return response
@@ -223,7 +237,7 @@ app = FastAPI(title="AI Agent Platform Worker", version="0.7.0")
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    return {"status": "healthy", "worker_id": worker.worker_id, "worker_status": worker.status, "ollama": OLLAMA_HOST, "model": DEFAULT_MODEL, "execution_mode": "agentic-reliable", "max_timeout_seconds": MAX_TIMEOUT_SECONDS, "max_agent_steps": MAX_AGENT_STEPS, "normal_agent_steps": MAX_NORMAL_AGENT_STEPS, "large_agent_steps": MAX_LARGE_AGENT_STEPS, "self_repair_attempts": ReliableAgentExecutor.MAX_ATTEMPTS, "idempotency": {"enabled": True, "scope": "worker-process", "max_entries": MAX_IDEMPOTENCY_ENTRIES}, "cancellation": {"enabled": True, "scope": "worker-process", "inflight_only": True}, "isolation": worker.isolation_policy.snapshot(), "network_policy": NetworkPolicy().snapshot(), "last_completed_at": worker.last_completed_at, "last_error": worker.last_error, "resources": resource_snapshot()}
+    return {"status": "healthy", "worker_id": worker.worker_id, "worker_status": worker.status, "ollama": OLLAMA_HOST, "model": DEFAULT_MODEL, "execution_mode": "agentic-reliable", "max_timeout_seconds": MAX_TIMEOUT_SECONDS, "max_agent_steps": MAX_AGENT_STEPS, "normal_agent_steps": MAX_NORMAL_AGENT_STEPS, "large_agent_steps": MAX_LARGE_AGENT_STEPS, "self_repair_attempts": ReliableAgentExecutor.MAX_ATTEMPTS, "idempotency": {"enabled": True, "scope": "worker-process", "max_entries": MAX_IDEMPOTENCY_ENTRIES}, "cancellation": {"enabled": True, "scope": "worker-process", "inflight_only": True}, "execution_fencing": {"enabled": True, "scope": "controller-ledger", "side_effects": "durable"}, "isolation": worker.isolation_policy.snapshot(), "network_policy": NetworkPolicy().snapshot(), "last_completed_at": worker.last_completed_at, "last_error": worker.last_error, "resources": resource_snapshot()}
 
 
 @app.post("/execute")
