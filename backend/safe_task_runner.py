@@ -79,7 +79,10 @@ class SafeTaskRunner(TaskRunner):
                 stored_result = attempt.get("result_json")
                 if stored_result:
                     current = original_store.get(task_id) or record; metadata = dict(current.get("metadata", {})); metadata.update({"execution_id": attempt["execution_id"], "fencing_token": attempt["fencing_token"], "execution_ledger_path": str(self.execution_ledger.path), "idempotent_replay": True})
-                    original_store.update(task_id, status=TaskStatus.COMPLETED.value, completed_at=time.time(), result=json.loads(stored_result), error=None, metadata=metadata); return
+                    replay_result = json.loads(stored_result)
+                    restored = self.execution_ledger.restore_committed_task_if_current(task_id, str(attempt["execution_id"]), int(attempt["fencing_token"]), result=replay_result, metadata=metadata)
+                    if restored:
+                        return
             self._fail_or_retry(task_id, record, "Execution idempotency request is already owned by another attempt."); return
 
         fencing_token = int(attempt["fencing_token"]); current = original_store.get(task_id) or record; metadata = dict(current.get("metadata", {}))
