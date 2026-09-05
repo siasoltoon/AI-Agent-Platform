@@ -42,15 +42,14 @@ class MissionOrchestrator:
 
     def _emit(self, event: MissionEvent) -> None:
         memory = self.developer.memory_store.load(event.mission_id)
-        if memory is None:
-            raise RuntimeError(f"Mission memory missing while recording event: {event.mission_id}")
-        memory.record_event(
-            phase=event.phase.value,
-            status=event.status,
-            mission_id=event.mission_id,
-            detail=event.detail,
-        )
-        self.developer.memory_store.save(memory)
+        if memory is not None:
+            memory.record_event(
+                phase=event.phase.value,
+                status=event.status,
+                mission_id=event.mission_id,
+                detail=event.detail,
+            )
+            self.developer.memory_store.save(memory)
         if self.event_sink is not None:
             self.event_sink(event)
 
