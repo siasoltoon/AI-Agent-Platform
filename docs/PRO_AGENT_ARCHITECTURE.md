@@ -24,6 +24,8 @@ This document defines the engineering direction for heavy autonomous software mi
 - Native network isolation is fail-closed when the host cannot establish the requested containment.
 - Recovery is bounded and must not recursively expand forever.
 - Heavy missions use orchestration rather than relying on one enormous model context.
+- Mission execution controls are invocation-scoped; orchestration must not mutate a shared developer runtime while another mission may be executing.
+- Model, timeout, and mission metadata are propagated through the orchestration boundary into the runtime/worker contract rather than being stored only as response decoration.
 - Testing is requirement-aware: code changes require test evidence; documentation-only work does not get blocked by an unrelated test requirement.
 - Evidence counters are cross-checked against actual tool records before acceptance.
 - Security, reliability, performance, and maintainability are treated as execution concerns, not post-processing.
@@ -42,5 +44,7 @@ Network capability modes are ordered from most restrictive to least restrictive:
 `deny < restricted < native < allow`
 
 A mission may request a mode at or below its contract mode. `native` additionally requires observable native containment evidence; if native containment cannot be established, execution is rejected instead of silently falling back to a weaker mode.
+
+Mission execution parameters (`model`, `timeout_seconds`, and metadata) are passed as invocation-local controls. Checkpointing wraps only that invocation's runtime, so concurrent missions cannot overwrite each other's runtime adapter.
 
 The architecture is intentionally incremental. Each hardening stage must preserve the existing production path and add executable evidence rather than creating parallel fake implementations.
