@@ -14,7 +14,8 @@ This document defines the engineering direction for heavy autonomous software mi
 8. **Recovery** — classify failures and repair root causes before retrying.
 9. **Acceptance** — complete only when the mission contract and evidence gates pass.
 10. **Persistence** — checkpoint state so interrupted missions can resume without blindly repeating completed work.
-11. **Finalization** — after a terminal completed/cancelled state is durably reached, clear the active execution identity while preserving the final checkpoint evidence.
+11. **Reconciliation** — compare the durable TaskStore and MissionStore state after restart or partial failure and converge only when the evidence makes the transition safe.
+12. **Finalization** — after a terminal completed/cancelled state is durably reached, clear the active execution identity while preserving the final checkpoint evidence.
 
 ## Engineering principles
 
@@ -41,11 +42,15 @@ This document defines the engineering direction for heavy autonomous software mi
 - Worker/process exceptions persist an `interrupted` outcome before the exception is propagated to the bounded recovery loop; unverified returns persist an `ambiguous` outcome so a later resume never treats an unverified response as proof of completion.
 - Resume reconciliation is conservative: only a matching, independently verified committed execution can advance the graph. Interrupted or ambiguous executions remain uncommitted and receive an explicit recovery checkpoint before retry.
 - The durable memory adapter protects a stronger execution outcome from being overwritten by a stale in-process snapshot when concurrent/restarted control paths save mission state.
+- Task ↔ mission reconciliation must never infer success from a terminal task or mission status alone. Task completion is propagated from mission state only when independent verification, acceptance, and durable execution evidence are present.
+- Missing mission state is handled conservatively: a queued professional task may create a pending mission; a running professional task with no mission is failed for explicit recovery rather than replayed blindly.
+- Cancellation is terminal and propagates safely from either store when the other side is still queued/running. Terminal conflicts such as completed task versus cancelled mission remain unresolved instead of silently rewriting history.
+- `POST /tasks/{task_id}/reconcile` provides an explicit operational reconciliation action. `MissionService.reconcile_many()` provides a bounded sweep primitive for a future controller startup/recovery hook without introducing an unbounded background loop.
 - The platform should prefer deterministic gates for safety-critical decisions and use the model for planning, implementation, diagnosis, and adaptation.
 
 ## Current architecture
 
-`Task API -> durable TaskRunner -> MissionOrchestrator -> AutonomousDeveloper -> MissionContract -> Capability Authorization -> AgentRuntime -> PC Worker -> Worker Isolation -> ReliableAgentExecutor -> AgentExecutor -> bounded tools -> NetworkPolicy -> NetworkSandbox -> isolated process -> evidence -> verification -> acceptance`
+`Task API -> durable TaskRunner -> MissionOrchestrator -> AutonomousDeveloper -> MissionContract -> Capability Authorization -> AgentRuntime -> PC Worker -> Worker Isolation -> ReliableAgentExecutor -> AgentExecutor -> bounded tools -> NetworkPolicy -> NetworkSandbox -> isolated process -> evidence -> verification -> acceptance -> Task/Mission Reconciliation`
 
 Long-running developer missions additionally use:
 
@@ -70,5 +75,7 @@ The mission service exposes a read-only inspection surface at `GET /tasks/{task_
 Production task dispatch now wires MissionService to `SQLiteMissionStore` using the controller's `TASK_DB_PATH`. The store atomically upserts complete mission snapshots, supports bounded status-filtered listing, and shares the controller database without changing the TaskStore schema.
 
 Execution recovery now records the outcome around the external runtime boundary. Before side effects, the exact execution ID is persisted as `running`. Exceptions become `interrupted`; returns without independently verified evidence become `ambiguous`; verified results become `committed`. This makes crash/retry behavior observable and prevents recovery code from silently promoting an uncertain execution into completed graph state.
+
+Task ↔ mission reconciliation is now a deterministic control-plane boundary. It understands the professional `mission.execute` command, compares durable task and mission status, repairs safe stale terminal state, creates missing pending state for queued missions, blocks unsafe replay, and exposes a bounded reconciliation sweep. It intentionally leaves ambiguous terminal conflicts unresolved so an operator or a later explicit recovery policy can decide what to do.
 
 The architecture is intentionally incremental. Each hardening stage must preserve the existing production path and add executable evidence rather than creating parallel fake implementations.
