@@ -50,22 +50,33 @@ class ExecutionFence:
             tool_name=str(tool_name),
             request_hash=request_hash,
         )
+        if record.get("request_hash") != request_hash or record.get("task_id") != self.task_id:
+            raise ExecutionFenceError("Side-effect idempotency key collision detected; request identity does not match.")
         if record.get("execution_id") != self.execution_id or int(record.get("fencing_token", -1)) != self.fencing_token:
             if record.get("state") == "committed" and record.get("result_json") is not None:
                 return key, record
             raise ExecutionFenceError("Side effect is already owned by another execution and cannot be replayed safely.")
         if record.get("state") == "ambiguous":
             raise ExecutionFenceError("Side effect outcome is ambiguous and must not be replayed automatically.")
+        if record.get("state") == "failed":
+            raise ExecutionFenceError("Side effect previously failed and must not be replayed automatically.")
         return key, record
 
     def commit_side_effect(self, key: str, result: Any) -> Any:
         self.assert_current()
         record = self.side_effects.get(key)
-        if record and record.get("state") == "committed" and record.get("result_json") is not None:
+        if record is None or record.get("task_id") != self.task_id or record.get("execution_id") != self.execution_id or int(record.get("fencing_token", -1)) != self.fencing_token:
+            raise ExecutionFenceError("Execution fence rejected side-effect commit because ownership changed.")
+        if record.get("state") == "committed" and record.get("result_json") is not None:
             return json.loads(record["result_json"])
+        if record.get("state") != "running":
+            raise ExecutionFenceError("Side-effect is not in a committable running state.")
         if not self.side_effects.commit(key, result=result):
             raise ExecutionFenceError("Execution fence rejected side-effect commit.")
         return result
 
     def mark_ambiguous(self, key: str, error: str) -> None:
+        record = self.side_effects.get(key)
+        if record is None or record.get("task_id") != self.task_id or record.get("execution_id") != self.execution_id or int(record.get("fencing_token", -1)) != self.fencing_token:
+            raise ExecutionFenceError("Execution fence rejected side-effect ambiguity transition because ownership changed.")
         self.side_effects.transition(key, "ambiguous", error=error)
