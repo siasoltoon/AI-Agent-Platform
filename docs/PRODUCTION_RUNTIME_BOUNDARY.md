@@ -25,6 +25,8 @@ No late worker may publish `completed` after a newer execution owns the task.
 
 Production startup must use `RecoverySweep` rather than the legacy `TaskStore.recover_running_tasks()` blind requeue path. Recovery preserves live ownership and fences orphaned executions before changing durable task state.
 
+If an execution is already durably `committed` but the process crashes before the task row is published as `completed`, `RecoverySweep` restores completion from the durable execution result through `restore_committed_task_if_current()`. The restore is itself fenced and refuses to reconcile an older execution after a newer fencing token exists.
+
 This distinction is intentional: a running task may already have performed an irreversible side effect, so converting every `running` row directly to `queued` would permit unsafe replay.
 
 ## Verification invariant
