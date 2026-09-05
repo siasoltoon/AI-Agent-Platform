@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException
 from agent_core.mission_memory import MissionMemoryStore
 from agent_core.mission_service import MissionService
 from agent_core.runtime import AgentRuntime
+from backend.storage.execution_ledger import ExecutionLedger
 from backend.storage.mission_store import SQLiteMissionStore
 from backend.storage.task_store import TaskQueueCapacityError, TaskStore
 from config.production_config import CONFIG
@@ -26,6 +27,7 @@ runtime = AgentRuntime()
 command_registry = CommandRegistry()
 task_router = TaskRouter(command_registry)
 TASK_STORE = TaskStore(os.getenv("TASK_DB_PATH", "data/tasks.db"))
+EXECUTION_LEDGER = ExecutionLedger(TASK_STORE.path)
 MISSION_STORE = SQLiteMissionStore(os.getenv("TASK_DB_PATH", "data/tasks.db"))
 TASK_RUNNER = None
 mission_service = MissionService(runtime=runtime, memory_store=MissionMemoryStore(MISSION_STORE), task_store=TASK_STORE)
@@ -106,6 +108,14 @@ async def get_task_events(task_id: str) -> dict:
     if TASK_STORE.get(task_id) is None:
         raise HTTPException(status_code=404, detail="Task not found.")
     return {"task_id": task_id, "events": TASK_STORE.events(task_id)}
+
+
+@router.get("/{task_id}/executions")
+async def get_task_executions(task_id: str, limit: int = 100) -> dict:
+    """Expose bounded execution-attempt history for recovery and audit tooling."""
+    if TASK_STORE.get(task_id) is None:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    return {"task_id": task_id, "attempts": EXECUTION_LEDGER.list_attempts(task_id, limit=limit)}
 
 
 @router.get("/{task_id}/mission")
