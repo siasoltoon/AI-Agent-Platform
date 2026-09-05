@@ -41,10 +41,11 @@ def test_worker_passes_authorized_capability_to_network_policy(monkeypatch: pyte
     captured: dict[str, object] = {}
 
     class FakeExecutor:
-        def __init__(self, service, **kwargs):
+        def __init__(self, service, network_policy=None, **kwargs):
+            captured["network_policy"] = network_policy
             captured.update(kwargs)
-            assert isinstance(kwargs["network_policy"], NetworkPolicy)
-            assert kwargs["network_policy"].mode == "deny"
+            assert isinstance(network_policy, NetworkPolicy)
+            assert network_policy.mode == "deny"
 
         def execute(self, prompt: str) -> dict[str, object]:
             return {
