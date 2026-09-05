@@ -15,9 +15,10 @@ from pydantic import BaseModel, Field, field_validator
 
 from agent_core.execution_agent import AgentExecutionError
 from agent_core.reliable_executor import ReliableAgentExecutor
+from agent_core.worker_isolation import WorkerIsolationError, WorkerIsolationPolicy
 from backend.services.ollama_service import OllamaService
 from backend.services.telemetry import snapshot as resource_snapshot
-from config.worker_config import DEFAULT_MODEL, OLLAMA_HOST, WORKER_TIMEOUT
+from config.worker_config import DEFAULT_MODEL, OLLAMA_HOST, WORKER_ISOLATION_ROOT, WORKER_TIMEOUT
 
 logger = logging.getLogger("ai_agent_worker")
 
@@ -67,8 +68,9 @@ class ExecuteRequest(BaseModel):
 
 
 class Worker:
-    def __init__(self, worker_id: str):
+    def __init__(self, worker_id: str, isolation_policy: WorkerIsolationPolicy | None = None):
         self.worker_id = worker_id
+        self.isolation_policy = isolation_policy or WorkerIsolationPolicy(WORKER_ISOLATION_ROOT)
         self.status = "idle"
         self.started_at: float | None = None
         self.last_completed_at: float | None = None
@@ -193,7 +195,8 @@ class Worker:
             metadata = job.get("metadata") or {}
             if not isinstance(metadata, dict) or len(metadata) > MAX_METADATA_KEYS:
                 raise ValueError(f"Task metadata cannot contain more than {MAX_METADATA_KEYS} keys.")
-            workspace = metadata.get("workspace")
+            requested_workspace = metadata.get("workspace")
+            workspace = self.isolation_policy.resolve_workspace(requested_workspace)
             execution_profile = str(metadata.get("execution_profile", "normal")).strip().lower()
             if execution_profile not in {"normal", "large"}:
                 raise ValueError("execution_profile must be either 'normal' or 'large'.")
@@ -201,15 +204,9 @@ class Worker:
             requested_steps = int(metadata.get("max_agent_steps", maximum_steps))
             if requested_steps < 1 or requested_steps > maximum_steps:
                 raise ValueError(f"max_agent_steps must be between 1 and {maximum_steps} for the {execution_profile} execution profile.")
-            logger.info("Executing task_id=%s model=%s prompt_length=%s timeout=%s mode=agentic-reliable profile=%s max_agent_steps=%s self_repair_attempts=%s", task_id, model, len(prompt), timeout, execution_profile, requested_steps, ReliableAgentExecutor.MAX_ATTEMPTS)
-            service = OllamaService(
-                base_url=OLLAMA_HOST,
-                model=model,
-                timeout=timeout,
-                cancel_event=cancellation_event,
-                use_isolated_cancellation_process=True,
-            )
-            executor = AgentExecutor(service, workspace_root=workspace, max_steps=requested_steps)
+            logger.info("Executing task_id=%s model=%s prompt_length=%s timeout=%s mode=agentic-reliable profile=%s max_agent_steps=%s workspace=%s isolation_root=%s self_repair_attempts=%s", task_id, model, len(prompt), timeout, execution_profile, requested_steps, workspace, self.isolation_policy.root, ReliableAgentExecutor.MAX_ATTEMPTS)
+            service = OllamaService(base_url=OLLAMA_HOST, model=model, timeout=timeout, cancel_event=cancellation_event, use_isolated_cancellation_process=True)
+            executor = AgentExecutor(service, workspace_root=str(workspace), max_steps=requested_steps)
             result = executor.execute(prompt)
             if cancellation_event is not None and cancellation_event.is_set():
                 logger.warning("Cancellation detected after executor returned task_id=%s cancel_to_executor_return_ms=%.1f total_elapsed_ms=%.1f", task_id, self._cancel_elapsed_ms(task_id), (time.monotonic() - execution_started) * 1000)
@@ -217,7 +214,7 @@ class Worker:
             if result.get("status") != "completed" or not result.get("execution_evidence", {}).get("verified", False):
                 raise AgentExecutionError("Agent execution completed without verified execution evidence.")
             self.last_completed_at = time.time()
-            response = {"status": "completed", "worker_id": self.worker_id, "task_id": task_id, "model": model, "execution_profile": execution_profile, "max_agent_steps": requested_steps, "result": result, "resource_snapshot": resource_snapshot(), "idempotency": {"key": task_id, "replayed": False}}
+            response = {"status": "completed", "worker_id": self.worker_id, "task_id": task_id, "model": model, "execution_profile": execution_profile, "max_agent_steps": requested_steps, "workspace": str(workspace), "isolation": self.isolation_policy.snapshot(), "result": result, "resource_snapshot": resource_snapshot(), "idempotency": {"key": task_id, "replayed": False}}
             self._store_result(task_id, response)
             return response
         except Exception as exc:
@@ -244,13 +241,16 @@ app = FastAPI(title="AI Agent Platform Worker", version="0.7.0")
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    return {"status": "healthy", "worker_id": worker.worker_id, "worker_status": worker.status, "ollama": OLLAMA_HOST, "model": DEFAULT_MODEL, "execution_mode": "agentic-reliable", "max_timeout_seconds": MAX_TIMEOUT_SECONDS, "max_agent_steps": MAX_AGENT_STEPS, "normal_agent_steps": MAX_NORMAL_AGENT_STEPS, "large_agent_steps": MAX_LARGE_AGENT_STEPS, "self_repair_attempts": ReliableAgentExecutor.MAX_ATTEMPTS, "idempotency": {"enabled": True, "scope": "worker-process", "max_entries": MAX_IDEMPOTENCY_ENTRIES}, "cancellation": {"enabled": True, "scope": "worker-process", "inflight_only": True}, "last_completed_at": worker.last_completed_at, "last_error": worker.last_error, "resources": resource_snapshot()}
+    return {"status": "healthy", "worker_id": worker.worker_id, "worker_status": worker.status, "ollama": OLLAMA_HOST, "model": DEFAULT_MODEL, "execution_mode": "agentic-reliable", "max_timeout_seconds": MAX_TIMEOUT_SECONDS, "max_agent_steps": MAX_AGENT_STEPS, "normal_agent_steps": MAX_NORMAL_AGENT_STEPS, "large_agent_steps": MAX_LARGE_AGENT_STEPS, "self_repair_attempts": ReliableAgentExecutor.MAX_ATTEMPTS, "idempotency": {"enabled": True, "scope": "worker-process", "max_entries": MAX_IDEMPOTENCY_ENTRIES}, "cancellation": {"enabled": True, "scope": "worker-process", "inflight_only": True}, "isolation": worker.isolation_policy.snapshot(), "last_completed_at": worker.last_completed_at, "last_error": worker.last_error, "resources": resource_snapshot()}
 
 
 @app.post("/execute")
 def execute(request: ExecuteRequest) -> dict[str, Any]:
     try:
         return worker.execute(request.model_dump())
+    except WorkerIsolationError as exc:
+        logger.error("Worker isolation rejected task: %s", exc)
+        raise HTTPException(status_code=403, detail={"message": "Worker isolation policy rejected the requested workspace.", "error_type": type(exc).__name__, "error": str(exc), "task_id": request.task_id}) from exc
     except (AgentExecutionError, ValueError, RuntimeError) as exc:
         logger.error("Agent execution failed: %s: %s", type(exc).__name__, exc)
         raise HTTPException(status_code=422, detail={"message": "Agent could not complete the task.", "error": str(exc), "task_id": request.task_id}) from exc
