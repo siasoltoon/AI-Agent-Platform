@@ -34,6 +34,7 @@ async def lifespan(_: FastAPI):
         tasks.TASK_STORE,
         lease_store,
         reconciler=tasks.mission_service.reconciler,
+        execution_ledger=execution_ledger,
     )
     runner = SafeTaskRunner(
         tasks.TASK_STORE,
