@@ -6,6 +6,7 @@ controller and the execution worker, including large-task execution.
 """
 
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -14,9 +15,6 @@ load_dotenv()
 
 WORKER_HOST = os.getenv("WORKER_HOST", "127.0.0.1")
 WORKER_PORT = int(os.getenv("WORKER_PORT", "8001"))
-# The worker executes a multi-step agent, so the default budget must cover
-# model generation plus tool/recovery steps. The HTTP transport adds its own
-# small grace window in WorkerClient rather than consuming this execution budget.
 WORKER_TIMEOUT = int(os.getenv("WORKER_TIMEOUT", "900"))
 LARGE_TASK_TIMEOUT = int(os.getenv("LARGE_TASK_TIMEOUT", "1800"))
 LARGE_TASK_THRESHOLD = int(os.getenv("LARGE_TASK_THRESHOLD", "12000"))
@@ -28,3 +26,7 @@ MISSION_CHUNK_CHARS = int(os.getenv("MISSION_CHUNK_CHARS", "16000"))
 
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "qwen2.5-coder:7b")
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+# Every worker execution must remain below this host-level workspace boundary.
+# Defaults to the worker process working directory so existing deployments do
+# not need an immediate environment change.
+WORKER_ISOLATION_ROOT = str(Path(os.getenv("WORKER_ISOLATION_ROOT", Path.cwd())).expanduser().resolve())
