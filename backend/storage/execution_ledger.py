@@ -57,7 +57,6 @@ class ExecutionLedger:
             connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_execution_task_idempotency ON execution_attempts(task_id, idempotency_key) WHERE idempotency_key IS NOT NULL")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_execution_task_state ON execution_attempts(task_id, state)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_execution_task_fence ON execution_attempts(task_id, fencing_token)")
-            # Existing installations created before result persistence receive the column without destructive migration.
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(execution_attempts)").fetchall()}
             if "result_json" not in columns:
                 connection.execute("ALTER TABLE execution_attempts ADD COLUMN result_json TEXT")
@@ -78,6 +77,29 @@ class ExecutionLedger:
             return self._decode(connection.execute(
                 "SELECT * FROM execution_attempts WHERE task_id=? ORDER BY fencing_token DESC LIMIT 1", (task_id,)
             ).fetchone())
+
+    def summary(self, *, limit: int = 100) -> dict[str, Any]:
+        """Return bounded, authoritative execution-attempt aggregates."""
+        limit = max(1, min(int(limit), 500))
+        with self._lock, self._connect() as connection:
+            counts_rows = connection.execute(
+                "SELECT state, COUNT(*) AS count FROM execution_attempts GROUP BY state"
+            ).fetchall()
+            counts = {state: 0 for state in sorted(self.STATES)}
+            for row in counts_rows:
+                counts[str(row["state"])] = int(row["count"])
+            total = sum(counts.values())
+            recent_rows = connection.execute(
+                "SELECT execution_id, task_id, attempt_no, worker_id, state, fencing_token, parent_execution_id, idempotency_key, started_at, finished_at, result_hash, error FROM execution_attempts ORDER BY fencing_token DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return {
+                "counts": counts,
+                "total": total,
+                "running": counts.get("running", 0),
+                "ambiguous": counts.get("ambiguous", 0),
+                "recent": [self._decode(row) or {} for row in recent_rows],
+            }
 
     def begin(
         self,
