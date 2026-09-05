@@ -8,6 +8,7 @@ import time
 import uuid
 
 from backend.recovery_sweep import RecoverySweep
+from backend.storage.execution_ledger import ExecutionLedger
 from backend.storage.worker_lease_store import WorkerLeaseStore
 from backend.task_runner import TaskRunner
 from task_engine.contracts import TaskStatus
@@ -26,6 +27,7 @@ class SafeTaskRunner(TaskRunner):
         shutdown_timeout_seconds: float = 5.0,
         lease_store: WorkerLeaseStore | None = None,
         recovery_sweep: RecoverySweep | None = None,
+        execution_ledger: ExecutionLedger | None = None,
         worker_id: str | None = None,
         lease_ttl_seconds: float | None = None,
         heartbeat_seconds: float | None = None,
@@ -39,6 +41,7 @@ class SafeTaskRunner(TaskRunner):
         )
         store_path = getattr(store, "path", "data/tasks.db")
         self.lease_store = lease_store or WorkerLeaseStore(store_path)
+        self.execution_ledger = execution_ledger or ExecutionLedger(store_path)
         self.recovery_sweep = recovery_sweep
         self.worker_id = str(worker_id or os.getenv("TASK_RUNNER_WORKER_ID") or f"controller-{uuid.uuid4()}")
         self.lease_ttl_seconds = max(5.0, float(lease_ttl_seconds or os.getenv("TASK_LEASE_TTL_SECONDS", "30")))
@@ -59,8 +62,6 @@ class SafeTaskRunner(TaskRunner):
             if self.recovery_sweep is not None:
                 self.recovery_sweep.sweep(limit=500)
             else:
-                # No blind TaskStore.recover_running_tasks(): a running task without
-                # a live owner is ambiguous and must require explicit recovery.
                 RecoverySweep(self.store, self.lease_store).sweep(limit=500)
             self._stop.clear()
             self._shutdown_timed_out = False
@@ -81,6 +82,7 @@ class SafeTaskRunner(TaskRunner):
             "worker returned an invalid json response object.",
             "execution lease lost",
             "execution lease could not be acquired",
+            "execution fence rejected",
         )
         if text.startswith(ambiguous_prefixes):
             return True
@@ -99,6 +101,9 @@ class SafeTaskRunner(TaskRunner):
         if current.get("status") not in {TaskStatus.RUNNING.value, TaskStatus.QUEUED.value}:
             return
         metadata = dict(current.get("metadata", {}))
+        execution_id = metadata.get("execution_id")
+        if execution_id:
+            self.execution_ledger.transition(execution_id, "ambiguous", error=error)
         metadata.update(
             {
                 "execution_ambiguous": True,
@@ -132,12 +137,37 @@ class SafeTaskRunner(TaskRunner):
             )
             return
 
+        attempt = self.execution_ledger.begin(
+            task_id,
+            self.worker_id,
+            execution_id=execution_id,
+            parent_execution_id=(record.get("metadata") or {}).get("execution_id"),
+            idempotency_key=(record.get("metadata") or {}).get("idempotency_key"),
+        )
+        if attempt.get("execution_id") != execution_id:
+            self.lease_store.release(task_id, self.worker_id, execution_id)
+            state = str(attempt.get("state", "unknown"))
+            if state == "committed":
+                stored_result = attempt.get("result_json")
+                if stored_result:
+                    import json
+                    current = self.store.get(task_id) or record
+                    metadata = dict(current.get("metadata", {}))
+                    metadata.update({"execution_id": attempt["execution_id"], "fencing_token": attempt["fencing_token"], "idempotent_replay": True})
+                    self.store.update(task_id, status=TaskStatus.COMPLETED.value, completed_at=time.time(), result=json.loads(stored_result), error=None, metadata=metadata)
+                    return
+            self._fail_or_retry(task_id, record, "Execution idempotency request is already owned by another attempt.")
+            return
+
+        fencing_token = int(attempt["fencing_token"])
         current = self.store.get(task_id) or record
         metadata = dict(current.get("metadata", {}))
         metadata.update(
             {
                 "worker_id": self.worker_id,
                 "execution_id": execution_id,
+                "fencing_token": fencing_token,
+                "attempt_no": int(attempt["attempt_no"]),
                 "lease_ttl_seconds": self.lease_ttl_seconds,
                 "heartbeat_seconds": self.heartbeat_seconds,
             }
@@ -163,10 +193,12 @@ class SafeTaskRunner(TaskRunner):
                     renewed = False
                 if not renewed:
                     lease_lost.set()
+                    self.execution_ledger.transition(execution_id, "ambiguous", error="Execution lease heartbeat was lost.")
                     return
 
         original_router = self.router
         lease_store = self.lease_store
+        ledger = self.execution_ledger
         worker_id = self.worker_id
 
         class LeaseCheckedRouter:
@@ -174,6 +206,8 @@ class SafeTaskRunner(TaskRunner):
                 result = original_router.route(task, task_id=task_id)
                 if lease_lost.is_set() or not lease_store.owns(task_id, worker_id, execution_id):
                     raise RuntimeError("Execution lease lost before durable completion could be trusted.")
+                if not ledger.fence_check(task_id, execution_id, fencing_token):
+                    raise RuntimeError("Execution fence rejected completion because a newer attempt owns the task.")
                 return result
 
         heartbeat_thread = threading.Thread(
@@ -183,10 +217,43 @@ class SafeTaskRunner(TaskRunner):
         )
         heartbeat_thread.start()
         self.router = LeaseCheckedRouter()
+
+        class FencedStore:
+            """Delegate all TaskStore operations except fenced completion."""
+            def __getattr__(inner_self, name):
+                return getattr(self.store, name)
+
+            def update(inner_self, update_task_id: str, **changes):
+                if update_task_id == task_id and changes.get("status") == TaskStatus.COMPLETED.value:
+                    ok = ledger.commit_task_if_current(
+                        task_id,
+                        execution_id,
+                        fencing_token,
+                        result=changes.get("result"),
+                        metadata=changes.get("metadata", {}),
+                    )
+                    if not ok:
+                        raise RuntimeError("Execution fence rejected completion because a newer attempt owns the task.")
+                    return self.store.get(task_id)
+                return self.store.update(update_task_id, **changes)
+
+        original_store = self.store
+        self.store = FencedStore()
         try:
             super()._execute(leased_record)
         finally:
+            self.store = original_store
             self.router = original_router
             heartbeat_stop.set()
             heartbeat_thread.join(timeout=max(1.0, self.heartbeat_seconds + 0.5))
+            current_attempt = ledger.get(execution_id)
+            if current_attempt and current_attempt.get("state") == "running":
+                if self.store.get(task_id) and self.store.get(task_id).get("status") == TaskStatus.COMPLETED.value:
+                    ledger.transition(execution_id, "committed")
+                else:
+                    ledger.transition(execution_id, "interrupted", error="Execution ended without a durable completion commit.")
             self.lease_store.release(task_id, self.worker_id, execution_id)
+
+
+DEFAULT_POLL_SECONDS = float(os.getenv("TASK_RUNNER_POLL_SECONDS", "0.25"))
+DEFAULT_TASK_RETRIES = max(0, min(int(os.getenv("TASK_RUNNER_MAX_RETRIES", "5")), 5))
