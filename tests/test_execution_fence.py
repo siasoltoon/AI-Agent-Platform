@@ -7,6 +7,7 @@ import pytest
 from agent_core.execution_fence import ExecutionFence, ExecutionFenceError
 from backend.storage.execution_ledger import ExecutionLedger
 from backend.storage.side_effect_ledger import SideEffectLedger
+from tool_system.file_tools import CopyFileTool
 
 
 def test_side_effect_is_idempotent_and_committed(tmp_path):
@@ -68,6 +69,23 @@ def test_ambiguous_side_effect_is_not_replayed(tmp_path):
 
     with pytest.raises(ExecutionFenceError, match="ambiguous"):
         fence.begin_side_effect("move_file", {"source": "a", "destination": "b"})
+
+
+def test_missing_copy_source_is_failed_not_ambiguous(tmp_path):
+    db = tmp_path / "tasks.db"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    ledger = ExecutionLedger(db)
+    effects = SideEffectLedger(db)
+    ledger.begin("task-1", "worker-1", execution_id="exec-1")
+    fence = ExecutionFence(task_id="task-1", execution_id="exec-1", fencing_token=1, ledger=ledger, side_effects=effects)
+    tool = CopyFileTool(workspace, execution_fence=fence)
+
+    with pytest.raises(FileNotFoundError):
+        tool.execute("missing.txt", "copy.txt")
+
+    key = fence.key("copy_file", {"source": str(workspace / "missing.txt"), "destination": str(workspace / "copy.txt")})
+    assert effects.get(key)["state"] == "failed"
 
 
 def test_side_effect_schema_is_durable(tmp_path):
