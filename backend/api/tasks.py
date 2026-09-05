@@ -28,7 +28,7 @@ task_router = TaskRouter(command_registry)
 TASK_STORE = TaskStore(os.getenv("TASK_DB_PATH", "data/tasks.db"))
 MISSION_STORE = SQLiteMissionStore(os.getenv("TASK_DB_PATH", "data/tasks.db"))
 TASK_RUNNER = None
-mission_service = MissionService(runtime=runtime, memory_store=MissionMemoryStore(MISSION_STORE))
+mission_service = MissionService(runtime=runtime, memory_store=MissionMemoryStore(MISSION_STORE), task_store=TASK_STORE)
 
 
 def _execute_agent_task(task: TaskRequest, *, task_id: str) -> dict:
@@ -118,6 +118,17 @@ async def get_mission_audit(task_id: str, event_limit: int = 100) -> dict:
     if snapshot is None:
         raise HTTPException(status_code=404, detail="Mission not found.")
     return snapshot
+
+
+@router.post("/{task_id}/reconcile")
+async def reconcile_mission_task(task_id: str) -> dict:
+    """Reconcile TaskStore and MissionStore without automatically replaying work."""
+    try:
+        return mission_service.reconcile(task_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Task not found.") from exc
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/{task_id}/cancel", response_model=TaskResponse)
