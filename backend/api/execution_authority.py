@@ -41,15 +41,15 @@ class SideEffectKeyRequest(BaseModel):
 
 class SideEffectCommitRequest(SideEffectKeyRequest):
     result: Any = None
-    execution_id: str
-    fencing_token: int
+    execution_id: str | None = None
+    fencing_token: int | None = None
     now: float | None = None
 
 
 class SideEffectTransitionRequest(SideEffectKeyRequest):
     state: str
-    execution_id: str
-    fencing_token: int
+    execution_id: str | None = None
+    fencing_token: int | None = None
     error: str | None = None
     now: float | None = None
 
@@ -87,9 +87,11 @@ def side_effect_begin(request: SideEffectBeginRequest, authorization: str | None
 def side_effect_commit(request: SideEffectCommitRequest, authorization: str | None = Header(default=None)) -> dict[str, bool]:
     _authorize(authorization)
     record = side_effects.get(request.idempotency_key)
-    if record is None or record.get("execution_id") != request.execution_id or int(record.get("fencing_token", -1)) != request.fencing_token:
+    execution_id = str(request.execution_id or record.get("execution_id") if record else "")
+    fencing_token = int(request.fencing_token if request.fencing_token is not None else record.get("fencing_token", -1) if record else -1)
+    if record is None or record.get("execution_id") != execution_id or int(record.get("fencing_token", -1)) != fencing_token:
         raise HTTPException(status_code=409, detail="Side effect ownership changed.")
-    if not tasks.EXECUTION_LEDGER.fence_check(str(record["task_id"]), request.execution_id, request.fencing_token):
+    if not tasks.EXECUTION_LEDGER.fence_check(str(record["task_id"]), execution_id, fencing_token):
         raise HTTPException(status_code=409, detail="Execution is no longer current.")
     return {"committed": side_effects.commit(request.idempotency_key, result=request.result, now=request.now)}
 
@@ -98,6 +100,10 @@ def side_effect_commit(request: SideEffectCommitRequest, authorization: str | No
 def side_effect_transition(request: SideEffectTransitionRequest, authorization: str | None = Header(default=None)) -> dict[str, bool]:
     _authorize(authorization)
     record = side_effects.get(request.idempotency_key)
-    if record is None or record.get("execution_id") != request.execution_id or int(record.get("fencing_token", -1)) != request.fencing_token:
+    execution_id = str(request.execution_id or record.get("execution_id") if record else "")
+    fencing_token = int(request.fencing_token if request.fencing_token is not None else record.get("fencing_token", -1) if record else -1)
+    if record is None or record.get("execution_id") != execution_id or int(record.get("fencing_token", -1)) != fencing_token:
         raise HTTPException(status_code=409, detail="Side effect ownership changed.")
+    if not tasks.EXECUTION_LEDGER.fence_check(str(record["task_id"]), execution_id, fencing_token):
+        raise HTTPException(status_code=409, detail="Execution is no longer current.")
     return {"transitioned": side_effects.transition(request.idempotency_key, request.state, error=request.error, now=request.now)}
