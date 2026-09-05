@@ -35,6 +35,20 @@ def test_process_runner_timeout_kills_process_group(tmp_path):
     assert "timed out" in stderr
 
 
+def test_process_runner_bounds_stdout_and_continues_draining(tmp_path):
+    runner = IsolatedProcessRunner(environment={"PATH": os.environ.get("PATH", "")})
+    command = [sys.executable, "-c", "print('x' * 2000000)"]
+    stdout, stderr, code, timed_out = runner.run(
+        command,
+        cwd=str(tmp_path),
+        limits=ProcessLimits(timeout_seconds=5, max_output_chars=1000),
+    )
+    assert code == 0
+    assert stderr == ""
+    assert len(stdout) <= 1030
+    assert "process output truncated" in stdout
+
+
 def test_process_limits_require_positive_values():
     with pytest.raises(ValueError):
         ProcessLimits(timeout_seconds=0, max_output_chars=1000)
