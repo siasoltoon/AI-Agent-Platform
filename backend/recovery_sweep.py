@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Any
 
@@ -29,6 +30,16 @@ class RecoverySweep:
     @staticmethod
     def _professional(task: dict[str, Any]) -> bool:
         return str(task.get("metadata", {}).get("command", "")).strip().lower() == "mission.execute"
+
+    @staticmethod
+    def _stored_result(attempt: dict[str, Any]) -> Any:
+        raw = attempt.get("result_json")
+        if raw is None:
+            return None
+        try:
+            return json.loads(raw)
+        except (TypeError, ValueError):
+            return None
 
     def sweep(self, *, limit: int = 100, now: float | None = None) -> dict[str, Any]:
         limit = max(1, min(int(limit), 500))
@@ -85,6 +96,49 @@ class RecoverySweep:
                 else:
                     attempt = self.execution_ledger.begin(task_id, "recovery-sweep", now=current)
                     execution_id = str(attempt["execution_id"])
+
+            # If durable execution already committed, reconcile the task from
+            # that authoritative result instead of treating it as an orphan.
+            # This closes the crash window between ledger commit and task-row
+            # publication while preserving fencing against newer attempts.
+            if (
+                attempt is not None
+                and str(attempt.get("state")) == "committed"
+                and str(attempt.get("execution_id")) == str(execution_id)
+            ):
+                stored_result = self._stored_result(attempt)
+                if stored_result is not None:
+                    metadata = dict(task.get("metadata", {}))
+                    metadata.update(
+                        {
+                            "execution_id": execution_id,
+                            "fencing_token": int(attempt["fencing_token"]),
+                            "recovery_required": False,
+                            "recovered_at": current,
+                            "committed_execution_reconciled": True,
+                            "execution_ledger_path": str(self.execution_ledger.path),
+                        }
+                    )
+                    restored = self.execution_ledger.restore_committed_task_if_current(
+                        task_id,
+                        str(execution_id),
+                        int(attempt["fencing_token"]),
+                        result=stored_result,
+                        metadata=metadata,
+                        now=current,
+                    )
+                    if restored:
+                        actions.append(
+                            {
+                                "task_id": task_id,
+                                "action": "committed_execution_reconciled",
+                                "task_status": "completed",
+                                "safe": True,
+                                "execution_id": execution_id,
+                                "execution_state": "committed",
+                            }
+                        )
+                        continue
 
             metadata = dict(task.get("metadata", {}))
             metadata.update(
