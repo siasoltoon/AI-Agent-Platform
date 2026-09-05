@@ -20,6 +20,14 @@ A worker may complete a task only when its execution is still the current ledger
 
 Therefore an expired worker can finish its local computation, but it cannot durably publish completion after a newer attempt has fenced it out.
 
+## Side-effect boundary
+
+`ExecutionFence` extends the invariant to side-effect-capable tools. Before a mutation is started, the current execution/fencing token is checked. A durable `SideEffectLedger` records the logical mutation request using a deterministic idempotency key and request hash.
+
+A previously committed side effect can be returned without executing the mutation again. A side effect belonging to another execution, or an effect whose outcome is `ambiguous`, is rejected rather than replayed. This makes file/process mutation a separate evidence boundary instead of treating the controller's completion record as proof that the underlying side effect happened exactly once.
+
+The side-effect ledger lives in the same SQLite database and is intentionally conservative: ambiguous outcomes require explicit operator-directed recovery or a downstream idempotency/fencing guarantee.
+
 ## Idempotency
 
 An optional `metadata.idempotency_key` identifies a logical request. Repeated creation with the same task/key returns the existing attempt rather than creating a second logical request. Committed results are retained in the ledger so a duplicate request can restore the durable result without executing side effects again.
@@ -38,4 +46,4 @@ Explicit retry creates a new execution attempt and therefore a new fencing token
 
 ## Safety boundary
 
-The ledger protects the controller's durable completion boundary. External side effects should also carry the execution/fencing identity when the downstream system supports idempotency or fencing. A successful local computation is never treated as proof that an external side effect was committed unless the downstream boundary provides equivalent guarantees.
+The execution ledger protects the controller's durable completion boundary. The side-effect ledger additionally records local mutation intent/outcome, but it cannot make an arbitrary OS process or external service transactional. For those boundaries, the tool must assert the execution fence immediately before mutation and the downstream operation should provide its own idempotency/fencing mechanism when available.
