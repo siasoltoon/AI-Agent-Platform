@@ -1,8 +1,8 @@
 """Process-level controls for terminal tool execution.
 
-This module provides process-group isolation and bounded execution. It is still not
-an OS sandbox; callers must provide a workspace boundary and treat the runner as a
-resource-control layer.
+This module provides process-group isolation, bounded resources, and bounded
+streaming output capture. It is still not an OS sandbox; callers must provide a
+workspace boundary and treat the runner as a resource-control layer.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import threading
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
@@ -79,6 +80,23 @@ class IsolatedProcessRunner:
         except OSError:
             pass
 
+    @staticmethod
+    def _capture_stream(stream, limit: int, chunks: list[str], size: list[int], truncated: list[bool]) -> None:
+        """Drain a pipe continuously while retaining only the configured ceiling."""
+        while True:
+            chunk = stream.read(4096)
+            if not chunk:
+                return
+            remaining = limit - size[0]
+            if remaining > 0:
+                kept = chunk[:remaining]
+                chunks.append(kept)
+                size[0] += len(kept)
+                if len(kept) < len(chunk):
+                    truncated[0] = True
+            else:
+                truncated[0] = True
+
     def run(
         self,
         args: Sequence[str],
@@ -98,15 +116,48 @@ class IsolatedProcessRunner:
             start_new_session=self._start_new_session(),
             preexec_fn=self._resource_preexec(limits),
         )
+
+        stdout_chunks: list[str] = []
+        stderr_chunks: list[str] = []
+        stdout_size = [0]
+        stderr_size = [0]
+        stdout_truncated = [False]
+        stderr_truncated = [False]
+        readers = (
+            threading.Thread(
+                target=self._capture_stream,
+                args=(process.stdout, limits.max_output_chars, stdout_chunks, stdout_size, stdout_truncated),
+                daemon=True,
+            ),
+            threading.Thread(
+                target=self._capture_stream,
+                args=(process.stderr, limits.max_output_chars, stderr_chunks, stderr_size, stderr_truncated),
+                daemon=True,
+            ),
+        )
+        for reader in readers:
+            reader.start()
+
+        timed_out = False
         try:
-            stdout, stderr = process.communicate(timeout=limits.timeout_seconds)
+            process.wait(timeout=limits.timeout_seconds)
         except subprocess.TimeoutExpired:
+            timed_out = True
             self._kill_process_tree(process)
-            stdout, stderr = process.communicate()
+            process.wait()
+        finally:
+            for reader in readers:
+                reader.join(timeout=2)
+
+        stdout = "".join(stdout_chunks)
+        stderr = "".join(stderr_chunks)
+        if stdout_truncated[0]:
+            stdout += "\n...<process output truncated>"
+        if stderr_truncated[0]:
+            stderr += "\n...<process output truncated>"
+        if timed_out:
             timeout_message = f"Command timed out after {limits.timeout_seconds} seconds."
-            if not stderr:
-                stderr = timeout_message
-            elif timeout_message not in stderr:
-                stderr = f"{stderr}\n{timeout_message}"
-            return stdout or "", stderr or "", 124, True
+            if timeout_message not in stderr:
+                stderr = f"{stderr}\n{timeout_message}" if stderr else timeout_message
+            return stdout, stderr, 124, True
         return stdout, stderr, process.returncode, False
