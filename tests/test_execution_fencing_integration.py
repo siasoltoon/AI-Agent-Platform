@@ -61,3 +61,54 @@ def test_stale_attempt_is_marked_ambiguous_after_recovery(tmp_path):
     assert result["stale_leases"] == 1
     assert store.get("task-1")["status"] == TaskStatus.FAILED.value
     assert ledger.get(attempt["execution_id"])["state"] == "ambiguous"
+
+
+def test_committed_execution_is_reconciled_after_crash_window(tmp_path):
+    db = tmp_path / "tasks.db"
+    store = TaskStore(db)
+    leases = WorkerLeaseStore(db)
+    ledger = ExecutionLedger(db)
+    seed(store)
+    store.claim_next_queued()
+    attempt = ledger.begin("task-1", "worker-a", execution_id="exec-committed")
+    result = {"execution_mode": "agentic", "result": {"steps": 2}, "execution_evidence": {"verified": True}}
+    assert ledger.commit_if_current(
+        "task-1",
+        "exec-committed",
+        attempt["fencing_token"],
+        result=result,
+    ) is True
+
+    recovery = RecoverySweep(store, leases, execution_ledger=ledger)
+    outcome = recovery.sweep(now=time.time())
+
+    assert store.get("task-1")["status"] == TaskStatus.COMPLETED.value
+    assert ledger.get("exec-committed")["state"] == "committed"
+    assert any(item["action"] == "committed_execution_reconciled" for item in outcome["actions"])
+
+
+def test_committed_old_execution_cannot_be_reconciled_after_newer_attempt(tmp_path):
+    db = tmp_path / "tasks.db"
+    store = TaskStore(db)
+    leases = WorkerLeaseStore(db)
+    ledger = ExecutionLedger(db)
+    seed(store)
+    store.claim_next_queued()
+    first = ledger.begin("task-1", "worker-a", execution_id="exec-old")
+    old_result = {"execution_mode": "agentic", "result": {"winner": "old"}}
+    assert ledger.commit_if_current(
+        "task-1",
+        "exec-old",
+        first["fencing_token"],
+        result=old_result,
+    ) is True
+    second = ledger.begin("task-1", "worker-b", execution_id="exec-new")
+
+    assert second["fencing_token"] > first["fencing_token"]
+    recovery = RecoverySweep(store, leases, execution_ledger=ledger)
+    outcome = recovery.sweep(now=time.time())
+
+    assert store.get("task-1")["status"] == TaskStatus.FAILED.value
+    assert ledger.get("exec-old")["state"] == "committed"
+    assert ledger.get("exec-new")["state"] == "ambiguous"
+    assert all(item["action"] != "committed_execution_reconciled" for item in outcome["actions"])
