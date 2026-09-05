@@ -47,5 +47,18 @@ class MissionService:
         result["metadata"] = mission_metadata
         return result
 
+    def inspect(self, task_id: str, *, event_limit: int = 100) -> dict[str, Any] | None:
+        """Return a bounded, read-only mission audit snapshot for operational inspection."""
+        if event_limit < 1 or event_limit > 1000:
+            raise ValueError("event_limit must be between 1 and 1000")
+        memory = self.developer.memory_store.load(task_id)
+        if memory is None:
+            return None
+        snapshot = memory.snapshot()
+        snapshot["events"] = list(memory.events[-event_limit:])
+        snapshot["event_count"] = len(memory.events)
+        snapshot["events_truncated"] = len(memory.events) > event_limit
+        return snapshot
+
     def cancel(self, task_id: str) -> dict[str, Any]:
         return self.orchestrator.cancel(task_id)
