@@ -43,7 +43,13 @@ class SafeTaskRunner(TaskRunner):
         self.worker_id = str(worker_id or os.getenv("TASK_RUNNER_WORKER_ID") or f"controller-{uuid.uuid4()}")
         self.lease_ttl_seconds = max(5.0, float(lease_ttl_seconds or os.getenv("TASK_LEASE_TTL_SECONDS", "30")))
         default_heartbeat = min(10.0, self.lease_ttl_seconds / 3.0)
-        self.heartbeat_seconds = max(1.0, min(float(heartbeat_seconds or os.getenv("TASK_HEARTBEAT_SECONDS", str(default_heartbeat))), self.lease_ttl_seconds / 2.0))
+        self.heartbeat_seconds = max(
+            1.0,
+            min(
+                float(heartbeat_seconds or os.getenv("TASK_HEARTBEAT_SECONDS", str(default_heartbeat))),
+                self.lease_ttl_seconds / 2.0,
+            ),
+        )
 
     def start(self) -> None:
         """Start without blindly requeueing executions that may have side effects."""
@@ -119,7 +125,11 @@ class SafeTaskRunner(TaskRunner):
             execution_id,
             ttl_seconds=self.lease_ttl_seconds,
         ):
-            self._fail_or_retry(task_id, record, "Execution lease could not be acquired; another execution may still own this task.")
+            self._fail_or_retry(
+                task_id,
+                record,
+                "Execution lease could not be acquired; another execution may still own this task.",
+            )
             return
 
         current = self.store.get(task_id) or record
@@ -155,19 +165,28 @@ class SafeTaskRunner(TaskRunner):
                     lease_lost.set()
                     return
 
+        original_router = self.router
+        lease_store = self.lease_store
+        worker_id = self.worker_id
+
+        class LeaseCheckedRouter:
+            def route(inner_self, task, *, task_id: str):
+                result = original_router.route(task, task_id=task_id)
+                if lease_lost.is_set() or not lease_store.owns(task_id, worker_id, execution_id):
+                    raise RuntimeError("Execution lease lost before durable completion could be trusted.")
+                return result
+
         heartbeat_thread = threading.Thread(
             target=heartbeat,
             name=f"task-heartbeat-{task_id}",
             daemon=True,
         )
         heartbeat_thread.start()
+        self.router = LeaseCheckedRouter()
         try:
             super()._execute(leased_record)
-            if lease_lost.is_set() or not self.lease_store.owns(task_id, self.worker_id, execution_id):
-                current = self.store.get(task_id)
-                if current and current.get("status") == TaskStatus.RUNNING.value:
-                    self._fail_or_retry(task_id, current, "Execution lease lost before durable completion could be trusted.")
         finally:
+            self.router = original_router
             heartbeat_stop.set()
             heartbeat_thread.join(timeout=max(1.0, self.heartbeat_seconds + 0.5))
             self.lease_store.release(task_id, self.worker_id, execution_id)
