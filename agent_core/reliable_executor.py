@@ -124,7 +124,9 @@ The goal of this recovery attempt is to finish the ORIGINAL MISSION, not to expl
             if elapsed_before_attempt >= self.budget.max_runtime_seconds: break
             effective_prompt = original if attempt == 1 else self._continuation_prompt(original, attempt, last_error, last_result)
             executor = AgentExecutor(self.ollama, workspace_root=self.workspace_root, max_steps=self.max_steps, max_output_chars=self.max_output_chars)
-            executor.terminal.network_policy = self.network_policy
+            terminal = getattr(executor, "terminal", None)
+            if terminal is not None:
+                terminal.network_policy = self.network_policy
             attempt_started_at = monotonic()
             logger.info("Reliable agent attempt started attempt=%s max_attempts=%s elapsed_seconds=%.3f remaining_budget_seconds=%.3f", attempt, self.max_attempts, elapsed_before_attempt, max(0.0, self.budget.max_runtime_seconds - elapsed_before_attempt))
             try:
