@@ -9,6 +9,7 @@ from typing import Any, Callable
 from agent_core.autonomous_developer import AutonomousDeveloper
 from agent_core.checkpointed_runtime import CheckpointedRuntime
 from agent_core.mission_contract import MissionContract
+from agent_core.mission_memory import MissionMemory
 from agent_core.verification import verify_execution
 
 
@@ -40,12 +41,29 @@ class MissionOrchestrator:
         self.event_sink = event_sink
 
     def _emit(self, event: MissionEvent) -> None:
+        memory = self.developer.memory_store.load(event.mission_id)
+        if memory is None:
+            raise RuntimeError(f"Mission memory missing while recording event: {event.mission_id}")
+        memory.record_event(
+            phase=event.phase.value,
+            status=event.status,
+            mission_id=event.mission_id,
+            detail=event.detail,
+        )
+        self.developer.memory_store.save(memory)
         if self.event_sink is not None:
             self.event_sink(event)
 
     @staticmethod
     def contract(objective: str) -> MissionContract:
         return MissionContract.from_objective(objective)
+
+    def _ensure_memory(self, mission_id: str, objective: str) -> None:
+        memory = self.developer.memory_store.load(mission_id)
+        if memory is None:
+            self.developer.memory_store.save(MissionMemory(mission_id, objective))
+        elif memory.objective.strip() != objective.strip():
+            raise ValueError("A persisted mission cannot be resumed with a different objective.")
 
     def _reconcile_interrupted_execution(self, mission_id: str) -> None:
         """Advance a task only when its persisted execution is independently verifiable."""
@@ -96,13 +114,9 @@ class MissionOrchestrator:
         timeout_seconds: int | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Run a mission using an invocation-local checkpointing adapter.
-
-        Runtime wrapping is injected into AutonomousDeveloper.run instead of
-        mutating the shared developer runtime, so concurrent missions cannot
-        accidentally execute through one another's checkpoint adapter.
-        """
+        """Run a mission using an invocation-local checkpointing adapter."""
         contract = self.contract(objective)
+        self._ensure_memory(mission_id, objective)
         self._emit(MissionEvent(MissionPhase.CONTRACT, "completed", mission_id, str(contract.snapshot())))
         self._reconcile_interrupted_execution(mission_id)
         for phase in (MissionPhase.RECON, MissionPhase.PLAN, MissionPhase.EXECUTE):
