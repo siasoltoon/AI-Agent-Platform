@@ -41,14 +41,7 @@ class ExecutionFence:
         key = self.key(tool_name, arguments)
         request_hash = self.side_effects.request_hash(tool_name, arguments)
         try:
-            record = self.side_effects.begin(
-                idempotency_key=key,
-                task_id=self.task_id,
-                execution_id=self.execution_id,
-                fencing_token=self.fencing_token,
-                tool_name=str(tool_name),
-                request_hash=request_hash,
-            )
+            record = self.side_effects.begin(idempotency_key=key, task_id=self.task_id, execution_id=self.execution_id, fencing_token=self.fencing_token, tool_name=str(tool_name), request_hash=request_hash)
         except Exception as exc:
             raise ExecutionFenceError(f"Execution authority is unavailable; refusing side effect: {exc}") from exc
         if record.get("request_hash") != request_hash or record.get("task_id") != self.task_id:
@@ -84,4 +77,9 @@ class ExecutionFence:
         record = self.side_effects.get(key)
         if record is None or record.get("task_id") != self.task_id or record.get("execution_id") != self.execution_id or int(record.get("fencing_token", -1)) != self.fencing_token:
             raise ExecutionFenceError("Execution fence rejected side-effect ambiguity transition because ownership changed.")
-        self.side_effects.transition(key, "ambiguous", error=error, execution_id=self.execution_id, fencing_token=self.fencing_token)
+        try:
+            transitioned = self.side_effects.transition(key, "ambiguous", error=error)
+        except Exception as exc:
+            raise ExecutionFenceError(f"Execution authority is unavailable; side-effect ambiguity is untrusted: {exc}") from exc
+        if not transitioned:
+            raise ExecutionFenceError("Execution fence rejected side-effect ambiguity transition.")
