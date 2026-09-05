@@ -35,6 +35,8 @@ This document defines the engineering direction for heavy autonomous software mi
 - Event persistence occurs before an external event sink is notified, so observability consumers cannot become the source of truth or prevent durable history from being recorded.
 - Operational inspection is read-only and bounded: callers can retrieve a mission snapshot and a limited suffix of its event history without mutating mission state.
 - Cancellation from the Task API must traverse the professional MissionService for `mission.execute` tasks so mission memory reaches a durable terminal state and records the cancellation event; worker cancellation remains the final execution-layer signal.
+- Production controller instances persist mission snapshots in the same SQLite database used by the task control plane, so mission state survives controller restart instead of relying only on process-local memory.
+- Durable mission loads prefer the external persistence adapter over the local cache, preventing a stale process-local snapshot from overriding newer state written by another controller instance.
 - The platform should prefer deterministic gates for safety-critical decisions and use the model for planning, implementation, diagnosis, and adaptation.
 
 ## Current architecture
@@ -60,5 +62,7 @@ Terminal checkpoint finalization is performed by the orchestrator after the deve
 The orchestrator also persists an ordered lifecycle event stream (`contract -> recon -> plan -> execute -> verify -> accept -> terminal`) inside the same mission memory record. This is intentionally a compact audit history rather than a replacement for execution evidence: tool records and verification remain authoritative for what actually happened.
 
 The mission service exposes a read-only inspection surface at `GET /tasks/{task_id}/mission`. It returns the durable mission snapshot plus `event_count` and a bounded event suffix (`event_limit`, 1–1000). A truncated response is explicitly marked with `events_truncated` so operators never mistake a bounded view for the complete history.
+
+Production task dispatch now wires MissionService to `SQLiteMissionStore` using the controller's `TASK_DB_PATH`. The store atomically upserts complete mission snapshots, supports bounded status-filtered listing, and shares the controller database without changing the TaskStore schema.
 
 The architecture is intentionally incremental. Each hardening stage must preserve the existing production path and add executable evidence rather than creating parallel fake implementations.
