@@ -134,6 +134,7 @@ class TerminalTool(BaseTool):
             "timed_out": timed_out,
             **({"timeout_seconds": timeout} if timed_out else {}),
             "process_isolation": "new_process_group",
+            "native_os_isolation": self._runner.isolation_mode(),
             "environment_policy": "allowlist",
             "shell": False,
         }
