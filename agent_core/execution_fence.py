@@ -28,9 +28,14 @@ class ExecutionFence:
         if not self.ledger.fence_check(self.task_id, self.execution_id, self.fencing_token):
             raise ExecutionFenceError("Execution fence rejected side effect because this attempt is no longer current.")
 
-    @staticmethod
-    def key(tool_name: str, arguments: Any) -> str:
-        payload = json.dumps({"tool": str(tool_name), "arguments": arguments}, ensure_ascii=False, sort_keys=True, default=str)
+    def key(self, tool_name: str, arguments: Any) -> str:
+        """Build a stable key scoped to the task, not the worker/execution attempt."""
+        payload = json.dumps(
+            {"task_id": self.task_id, "tool": str(tool_name), "arguments": arguments},
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def begin_side_effect(self, tool_name: str, arguments: Any) -> tuple[str, dict[str, Any]]:
