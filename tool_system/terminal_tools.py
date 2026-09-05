@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import os
 import shlex
-import subprocess
 from pathlib import Path
 from typing import Any
 
 from agent_core.security_boundary import WorkspaceBoundary
 
 from .base_tool import BaseTool
+from .process_runner import IsolatedProcessRunner, ProcessLimits
 
 
 class TerminalTool(BaseTool):
@@ -29,15 +29,17 @@ class TerminalTool(BaseTool):
         "powershell", "pwsh", "cmd", "rmdir", "rd", "rm", "sudo", "chmod", "chown",
     }
     _SHELL_OPERATORS = frozenset(";&|><`")
-    _SENSITIVE_ENV_MARKERS = (
-        "PASSWORD", "PASSWD", "SECRET", "TOKEN", "API_KEY", "PRIVATE_KEY", "CREDENTIAL",
-        "AUTH_TOKEN", "ACCESS_TOKEN", "CLIENT_SECRET", "DATABASE_URL",
-    )
+    _SAFE_ENV_KEYS = frozenset({
+        "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "TMPDIR",
+        "HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "LANG", "LC_ALL", "LC_CTYPE",
+        "VIRTUAL_ENV",
+    })
     MAX_OUTPUT_CHARS = 12_000
 
     def __init__(self, workspace_root: str | Path | None = None) -> None:
         self.workspace = Path(workspace_root or Path.cwd()).resolve()
         self._boundary = WorkspaceBoundary(self.workspace)
+        self._runner = IsolatedProcessRunner(environment=self._safe_environment())
 
     @staticmethod
     def _truncate(value: str) -> str:
@@ -71,19 +73,15 @@ class TerminalTool(BaseTool):
     @classmethod
     def _contains_blocked_command(cls, command: str) -> bool:
         try:
-            tokens = shlex.split(command, posix=True)
+            tokens = __import__("shlex").split(command, posix=True)
         except ValueError:
             return True
         return any(token.lower() in cls._BLOCKED_COMMANDS for token in tokens)
 
     @classmethod
     def _safe_environment(cls) -> dict[str, str]:
-        """Pass normal process configuration while excluding obvious secret-bearing variables."""
-        return {
-            key: value
-            for key, value in os.environ.items()
-            if not any(marker in key.upper() for marker in cls._SENSITIVE_ENV_MARKERS)
-        }
+        """Pass only non-secret process configuration needed by developer toolchains."""
+        return {key: value for key, value in __import__("os").environ.items() if key.upper() in cls._SAFE_ENV_KEYS}
 
     def _safe_path(self, path: str | Path) -> Path:
         return self._boundary.assert_safe(path)
@@ -124,30 +122,18 @@ class TerminalTool(BaseTool):
                 self._safe_path(target).mkdir(parents=True, exist_ok=True)
             return {"stdout": "", "stderr": "", "code": 0, "timed_out": False}
 
-        try:
-            result = subprocess.run(
-                command,
-                shell=True,
-                cwd=str(self.workspace),
-                env=self._safe_environment(),
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as exc:
-            stdout = exc.stdout if isinstance(exc.stdout, str) else ""
-            stderr = exc.stderr if isinstance(exc.stderr, str) else ""
-            return {
-                "stdout": self._truncate(stdout),
-                "stderr": self._truncate(stderr or f"Command timed out after {timeout} seconds."),
-                "code": 124,
-                "timed_out": True,
-                "timeout_seconds": timeout,
-            }
+        result_stdout, result_stderr, returncode, timed_out = self._runner.run(
+            tokens,
+            cwd=str(self.workspace),
+            limits=ProcessLimits(timeout_seconds=timeout, max_output_chars=self.MAX_OUTPUT_CHARS),
+        )
         return {
-            "stdout": self._truncate(result.stdout),
-            "stderr": self._truncate(result.stderr),
-            "code": result.returncode,
-            "timed_out": False,
+            "stdout": self._truncate(result_stdout),
+            "stderr": self._truncate(result_stderr),
+            "code": returncode,
+            "timed_out": timed_out,
+            **({"timeout_seconds": timeout} if timed_out else {}),
+            "process_isolation": "new_process_group",
+            "environment_policy": "allowlist",
+            "shell": False,
         }
