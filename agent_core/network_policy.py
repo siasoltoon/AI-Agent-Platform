@@ -1,8 +1,8 @@
 """Explicit network-access policy for agent terminal execution.
 
-This is a command/tool policy, not a kernel network namespace or firewall. It
-fails closed for explicitly network-oriented terminal programs and common
-interpreter-based network escapes while preserving normal local development.
+This policy can enforce command-level restrictions or request native network
+containment. Native containment is implemented separately and fails closed
+when the host cannot enforce it.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ class NetworkPolicyError(PermissionError):
 
 @dataclass(frozen=True)
 class NetworkPolicy:
-    """Control network-oriented terminal commands at the agent tool boundary."""
+    """Control network access at the agent tool boundary."""
 
     mode: str = "restricted"
 
@@ -39,12 +39,12 @@ class NetworkPolicy:
     })
 
     def __post_init__(self) -> None:
-        if self.mode not in {"deny", "restricted", "allow"}:
-            raise ValueError("Network policy mode must be deny, restricted, or allow.")
+        if self.mode not in {"deny", "restricted", "native", "allow"}:
+            raise ValueError("Network policy mode must be deny, restricted, native, or allow.")
 
     def check_command(self, executable: str, command: str | None = None) -> None:
         name = str(executable).strip().lower()
-        if self.mode == "allow":
+        if self.mode in {"allow", "native"}:
             return
         if name in self._DIRECT_NETWORK_COMMANDS:
             raise NetworkPolicyError(f"Network command is blocked by policy: {name}")
@@ -55,12 +55,7 @@ class NetworkPolicy:
 
     @classmethod
     def _check_interpreter_command(cls, executable: str, command: str) -> None:
-        """Reject obvious interpreter-level network escape attempts.
-
-        This deliberately targets high-confidence network primitives rather than
-        trying to parse an entire programming language. A kernel-level sandbox is
-        still required for complete enforcement.
-        """
+        """Reject obvious interpreter-level network escape attempts."""
         lowered = command.lower()
         try:
             tokens = [token.lower() for token in shlex.split(command, posix=True)]
@@ -77,14 +72,14 @@ class NetworkPolicy:
             "mode": self.mode,
             "executable": str(executable).strip().lower(),
             "allowed": bool(allowed),
-            "enforcement": "terminal-command-policy",
-            "interpreter_escape_detection": True,
+            "enforcement": "native-network-sandbox" if self.mode == "native" else "terminal-command-policy",
+            "interpreter_escape_detection": self.mode not in {"allow", "native"},
         }
 
     def snapshot(self) -> dict[str, Any]:
         return {
             "mode": self.mode,
-            "enforcement": "terminal-command-policy",
-            "interpreter_escape_detection": True,
-            "kernel_network_isolation": False,
+            "enforcement": "native-network-sandbox" if self.mode == "native" else "terminal-command-policy",
+            "interpreter_escape_detection": self.mode not in {"allow", "native"},
+            "kernel_network_isolation": self.mode == "native",
         }
