@@ -159,7 +159,7 @@ class MissionMemoryStore:
 
     def save(self, memory: MissionMemory) -> None:
         payload = memory.snapshot()
-        existing = self._durable_payload(memory.mission_id)
+        existing = self._durable_payload(memory.mission_id) or self._memory.get(memory.mission_id)
         if existing:
             existing_id = str(existing.get("active_execution_id", ""))
             incoming_id = str(payload.get("active_execution_id", ""))
