@@ -18,21 +18,7 @@ from task_engine.contracts import TaskStatus
 class SafeTaskRunner(TaskRunner):
     """Prevent automatic replay when a worker outcome is execution-ambiguous."""
 
-    def __init__(
-        self,
-        store,
-        router,
-        *,
-        poll_seconds: float = 0.25,
-        default_retries: int = 5,
-        shutdown_timeout_seconds: float = 5.0,
-        lease_store: WorkerLeaseStore | None = None,
-        recovery_sweep: RecoverySweep | None = None,
-        execution_ledger: ExecutionLedger | None = None,
-        worker_id: str | None = None,
-        lease_ttl_seconds: float | None = None,
-        heartbeat_seconds: float | None = None,
-    ) -> None:
+    def __init__(self, store, router, *, poll_seconds: float = 0.25, default_retries: int = 5, shutdown_timeout_seconds: float = 5.0, lease_store: WorkerLeaseStore | None = None, recovery_sweep: RecoverySweep | None = None, execution_ledger: ExecutionLedger | None = None, worker_id: str | None = None, lease_ttl_seconds: float | None = None, heartbeat_seconds: float | None = None) -> None:
         super().__init__(store, router, poll_seconds=poll_seconds, default_retries=default_retries, shutdown_timeout_seconds=shutdown_timeout_seconds)
         store_path = getattr(store, "path", "data/tasks.db")
         self.lease_store = lease_store or WorkerLeaseStore(store_path)
@@ -71,19 +57,12 @@ class SafeTaskRunner(TaskRunner):
         execution_id = metadata.get("execution_id")
         metadata.update({"execution_ambiguous": True, "automatic_retry_suppressed": True, "recovery_required": True, "last_error": error})
         if execution_id and current.get("status") == TaskStatus.RUNNING.value:
-            # Terminalize the task and its execution attempt under the same
-            # durable fence; a stale worker cannot overwrite a newer attempt.
-            failed = self.execution_ledger.fail_orphaned_if_current(
-                task_id,
-                str(execution_id),
-                error=error,
-                metadata=metadata,
-            )
-            if failed:
-                return
-            refreshed = self.store.get(task_id)
-            if refreshed is None or refreshed.get("status") != TaskStatus.RUNNING.value:
-                return
+            # A running task with an execution identity must terminalize through
+            # the same durable fence. Never fall back to an unfenced TaskStore
+            # update after a fence rejection, because that could clobber a newer
+            # execution attempt.
+            self.execution_ledger.fail_orphaned_if_current(task_id, str(execution_id), error=error, metadata=metadata)
+            return
         if execution_id:
             self.execution_ledger.transition(execution_id, "ambiguous", error=error)
         self.store.update(task_id, status=TaskStatus.FAILED.value, completed_at=time.time(), error=error, metadata=metadata)
