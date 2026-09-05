@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 from pathlib import Path
@@ -29,12 +30,10 @@ class TerminalTool(BaseTool):
         from agent_core.network_sandbox import NetworkSandbox
         if self.network_policy.mode == "native": return NetworkSandbox("native")
         return NetworkSandbox("command-policy")
-
     @staticmethod
     def _truncate(value: str) -> str:
         if len(value) <= TerminalTool.MAX_OUTPUT_CHARS: return value
         omitted = len(value) - TerminalTool.MAX_OUTPUT_CHARS; return value[: TerminalTool.MAX_OUTPUT_CHARS] + f"\n...<truncated {omitted} chars>"
-
     @classmethod
     def _contains_blocked_shell_syntax(cls, command: str) -> bool:
         quote = None; escaped = False
@@ -47,23 +46,22 @@ class TerminalTool(BaseTool):
             if char in {"'", '"'}: quote = char; continue
             if char in cls._SHELL_OPERATORS: return True
         return quote is not None
-
     @classmethod
     def _contains_blocked_command(cls, command: str) -> bool:
         try: tokens = shlex.split(command, posix=True)
         except ValueError: return True
         return any(token.lower() in cls._BLOCKED_COMMANDS for token in tokens)
-
     @classmethod
     def _safe_environment(cls) -> dict[str, str]: return {key: value for key, value in os.environ.items() if key.upper() in cls._SAFE_ENV_KEYS}
     def _safe_path(self, path: str | Path) -> Path: return self._boundary.assert_safe(path)
-
     def _fence_begin(self, command: str, executable: str) -> str | None:
         if self.execution_fence is None: return None
-        key, record = self.execution_fence.begin_side_effect(executable, {"command": command, "workspace": str(self.workspace)})
-        if record.get("state") == "committed": return key
-        return key
-
+        key, _ = self.execution_fence.begin_side_effect(executable, {"command": command, "workspace": str(self.workspace)}); return key
+    def _fence_replay(self, key: str | None) -> dict[str, Any] | None:
+        if self.execution_fence is None or key is None: return None
+        record = self.execution_fence.side_effects.get(key)
+        if record and record.get("state") == "committed" and record.get("result_json") is not None: return json.loads(record["result_json"])
+        return None
     def _fence_commit(self, key: str | None, result: dict[str, Any]) -> dict[str, Any]:
         if self.execution_fence is None or key is None: return result
         return self.execution_fence.commit_side_effect(key, result)
@@ -78,6 +76,8 @@ class TerminalTool(BaseTool):
         if executable not in self._ALLOWED: raise PermissionError(f"Terminal command is not allowed: {executable}")
         if self._contains_blocked_shell_syntax(command) or self._contains_blocked_command(command): raise PermissionError("Terminal command contains a blocked operation.")
         self.network_policy.check_command(executable, command); network_evidence = self.network_policy.evidence(executable, allowed=True); key = self._fence_begin(command, executable)
+        replay = self._fence_replay(key)
+        if replay is not None: return replay
         try:
             if self.execution_fence is not None: self.execution_fence.assert_current()
             if executable == "type":
@@ -94,8 +94,7 @@ class TerminalTool(BaseTool):
                 for target in targets: self._safe_path(target).mkdir(parents=True, exist_ok=True)
                 return self._fence_commit(key, {"stdout": "", "stderr": "", "code": 0, "timed_out": False, "network_policy": network_evidence, "network_isolation": self._runner.network_isolation()})
             should_terminate = None
-            if self.execution_fence is not None:
-                should_terminate = lambda: not self.execution_fence.ledger.fence_check(self.execution_fence.task_id, self.execution_fence.execution_id, self.execution_fence.fencing_token)
+            if self.execution_fence is not None: should_terminate = lambda: not self.execution_fence.ledger.fence_check(self.execution_fence.task_id, self.execution_fence.execution_id, self.execution_fence.fencing_token)
             result_stdout, result_stderr, returncode, timed_out = self._runner.run(tokens, cwd=str(self.workspace), limits=ProcessLimits(timeout_seconds=timeout, max_output_chars=self.MAX_OUTPUT_CHARS), should_terminate=should_terminate)
             if self.execution_fence is not None: self.execution_fence.assert_current()
             result = {"stdout": self._truncate(result_stdout), "stderr": self._truncate(result_stderr), "code": returncode, "timed_out": timed_out, **({"timeout_seconds": timeout} if timed_out else {}), "process_isolation": "new_process_group", "native_os_isolation": self._runner.isolation_mode(), "environment_policy": "allowlist", "network_policy": network_evidence, "network_isolation": self._runner.network_isolation(), "shell": False}
