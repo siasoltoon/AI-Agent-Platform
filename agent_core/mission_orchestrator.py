@@ -71,6 +71,21 @@ class MissionOrchestrator:
         memory.clear_execution()
         self.developer.memory_store.save(memory)
 
+    def _finalize_terminal_checkpoint(self, mission_id: str, status: str) -> None:
+        """Clear active execution identity only after the mission reaches a terminal state."""
+        if status not in {"completed", "cancelled"}:
+            return
+        memory = self.developer.memory_store.load(mission_id)
+        if memory is None or not memory.active_execution_id:
+            return
+        memory.checkpoint(
+            step_id=memory.active_task or "mission",
+            summary=f"terminal mission state finalized: {status}",
+            evidence={"execution_id": memory.active_execution_id, "terminal": status},
+        )
+        memory.clear_execution()
+        self.developer.memory_store.save(memory)
+
     def run(
         self,
         mission_id: str,
@@ -108,6 +123,7 @@ class MissionOrchestrator:
             metadata=metadata,
         )
         status = str(result.get("status", "blocked"))
+        self._finalize_terminal_checkpoint(mission_id, status)
         terminal_phase = MissionPhase.COMPLETE if status == "completed" else MissionPhase.CANCELLED if status == "cancelled" else MissionPhase.BLOCKED
         self._emit(MissionEvent(MissionPhase.VERIFY, "completed" if result.get("verified") else "evaluated", mission_id))
         self._emit(MissionEvent(MissionPhase.ACCEPT, "accepted" if result.get("acceptance", {}).get("accepted") else "evaluated", mission_id))
@@ -116,5 +132,6 @@ class MissionOrchestrator:
 
     def cancel(self, mission_id: str) -> dict[str, Any]:
         result = self.developer.cancel(mission_id)
+        self._finalize_terminal_checkpoint(mission_id, "cancelled")
         self._emit(MissionEvent(MissionPhase.CANCELLED, "cancelled", mission_id))
         return result
