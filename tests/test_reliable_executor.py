@@ -59,6 +59,23 @@ def test_quality_gate_rejects_timed_out_terminal_test_even_when_tool_ok():
     assert "requested_tests_not_executed_successfully" in blockers
 
 
+def test_quality_gate_rejects_independent_verification_security_violation():
+    result = _result(build=True)
+    result["tool_records"][0]["result"]["security_violation"] = True
+    accepted, blockers = ReliableAgentExecutor._quality_gate("Build the application and run pytest.", result)
+    assert accepted is False
+    assert any(item.startswith("independent_verification:security_clean") for item in blockers)
+
+
+def test_quality_gate_rejects_independent_verification_network_escalation():
+    result = _result(build=True)
+    result["mission_contract"] = {"network_access": "restricted"}
+    result["network_capability"] = {"contract_mode": "restricted", "authorized_mode": "native"}
+    accepted, blockers = ReliableAgentExecutor._quality_gate("Build the application and run pytest.", result)
+    assert accepted is False
+    assert any(item.startswith("independent_verification:network_capability_compliant") for item in blockers)
+
+
 def test_continuation_prompt_preserves_original_task_and_failure():
     executor = ReliableAgentExecutor.__new__(ReliableAgentExecutor)
     executor.max_output_chars = 12000

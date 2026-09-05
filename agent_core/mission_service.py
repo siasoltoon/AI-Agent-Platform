@@ -1,0 +1,89 @@
+"""Production mission service that connects task dispatch to the durable mission orchestrator."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from agent_core.autonomous_developer import AutonomousDeveloper
+from agent_core.mission_memory import MissionMemory, MissionMemoryStore
+from agent_core.mission_orchestrator import MissionOrchestrator
+from agent_core.mission_reconciliation import MissionReconciler
+from agent_core.runtime import AgentRuntime
+from backend.storage.task_store import TaskStore
+
+
+class MissionService:
+    """Expose the professional mission lifecycle through the existing task command path."""
+
+    def __init__(
+        self,
+        runtime: AgentRuntime | None = None,
+        event_sink=None,
+        memory_store: MissionMemoryStore | None = None,
+        task_store: TaskStore | None = None,
+    ) -> None:
+        self.runtime = runtime or AgentRuntime()
+        self.developer = AutonomousDeveloper(self.runtime, memory_store=memory_store)
+        self.orchestrator = MissionOrchestrator(self.developer, event_sink=event_sink)
+        self.reconciler = MissionReconciler(task_store, self.developer.memory_store) if task_store is not None else None
+
+    def execute(
+        self,
+        prompt: str,
+        *,
+        task_id: str,
+        model: str | None = None,
+        timeout_seconds: int | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Run a mission while preserving the Task API's execution envelope."""
+        mission_metadata = dict(metadata or {})
+        contract = self.orchestrator.contract(prompt)
+        mission_metadata.update({
+            "mission_mode": "professional",
+            "mission_contract": contract.snapshot(),
+            "network_access": contract.network_access,
+        })
+        result = self.orchestrator.run(
+            task_id,
+            prompt,
+            max_retries=int(mission_metadata.get("max_retries", 3)),
+            model=model,
+            timeout_seconds=timeout_seconds,
+            metadata=mission_metadata,
+        )
+        result["execution_mode"] = "professional_mission"
+        result["model"] = model or self.runtime.default_model
+        result["metadata"] = mission_metadata
+        return result
+
+    def inspect(self, task_id: str, *, event_limit: int = 100) -> dict[str, Any] | None:
+        """Return a bounded, read-only mission audit snapshot for operational inspection."""
+        if event_limit < 1 or event_limit > 1000:
+            raise ValueError("event_limit must be between 1 and 1000")
+        memory = self.developer.memory_store.load(task_id)
+        if memory is None:
+            return None
+        snapshot = memory.snapshot()
+        snapshot["events"] = list(memory.events[-event_limit:])
+        snapshot["event_count"] = len(memory.events)
+        snapshot["events_truncated"] = len(memory.events) > event_limit
+        return snapshot
+
+    def reconcile(self, task_id: str) -> dict[str, Any]:
+        """Reconcile one professional task with its durable mission without blind replay."""
+        if self.reconciler is None:
+            raise RuntimeError("Mission reconciliation requires a TaskStore")
+        return self.reconciler.reconcile(task_id).snapshot()
+
+    def reconcile_many(self, *, limit: int = 100, status: str | None = None) -> list[dict[str, Any]]:
+        """Reconcile a bounded task slice for operational recovery sweeps."""
+        if self.reconciler is None:
+            raise RuntimeError("Mission reconciliation requires a TaskStore")
+        return self.reconciler.reconcile_many(limit=limit, status=status)
+
+    def cancel(self, task_id: str, *, objective: str | None = None) -> dict[str, Any]:
+        """Cancel a mission and persist its terminal event even if execution never started."""
+        if objective and self.developer.memory_store.load(task_id) is None:
+            self.developer.memory_store.save(MissionMemory(task_id, objective))
+        return self.orchestrator.cancel(task_id)

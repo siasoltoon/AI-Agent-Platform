@@ -18,9 +18,13 @@ The controller uses the canonical Task Contract and routes `agent.execute` tasks
 
 Task submission is asynchronous: the API persists a task as `queued`, the durable background runner claims it, executes it through the real agent/PC worker path, and persists `completed` or `failed` evidence. The dashboard polls the task endpoint so the user can observe the real lifecycle without keeping the HTTP request open.
 
-The agent is considered complete only after real tool execution and observable verification evidence. It does not treat model-generated suggested code as task completion.
+The agent is considered complete only after real tool execution, observable evidence and independent verification. It does not treat model-generated suggested code as task completion.
 
-The reliable execution layer now gives each worker execution a bounded six-attempt self-repair budget. A recovery attempt receives the original mission, the previous failure and recent tool observations, then continues from the existing workspace instead of restarting blindly. Durable task retries are also bounded at five retries, so transient worker/model failures can recover without requiring the user to resubmit the task.
+Each execution is protected by a durable execution ID and monotonic fencing token. Completion is committed atomically through the execution ledger, so stale workers cannot publish completion after a newer attempt takes ownership. Recovery can reconcile a durable committed attempt after restart without replaying the agent.
+
+Mutation-capable tools use a durable side-effect ledger with task-scoped idempotency keys, request-hash validation and ownership fencing. Committed results can be replayed idempotently; ambiguous and failed side effects are never blindly replayed.
+
+The reliable execution layer gives each worker execution a bounded six-attempt self-repair budget. A recovery attempt receives the original mission, the previous failure and recent tool observations, then continues from the existing workspace instead of restarting blindly. Durable task retries are also bounded at five retries, so transient worker/model failures can recover without requiring the user to resubmit the task.
 
 ## Live worker telemetry
 
@@ -63,3 +67,7 @@ npm run build
 ```
 
 The repository gate intentionally does not claim live PC-worker/Ollama execution. That environment-dependent acceptance test must be performed after synchronizing the exact hardening branch to the PC.
+
+## Final production readiness
+
+The complete execution/recovery boundary and acceptance checklist is documented in `docs/FINAL_PRODUCTION_READINESS.md`. The final audit also covers the execution fence, durable execution ledger, side-effect ledger, recovery sweep and safe task runner.

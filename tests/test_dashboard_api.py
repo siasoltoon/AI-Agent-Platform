@@ -35,7 +35,7 @@ def test_dashboard_summary_uses_real_task_state(monkeypatch, tmp_path: Path):
     assert payload["workers"]["workers"] == []
 
 
-def test_dashboard_diagnostics_reports_task_store(monkeypatch, tmp_path: Path):
+def test_dashboard_diagnostics_reports_task_store_and_execution_ledger(monkeypatch, tmp_path: Path):
     store = TaskStore(tmp_path / "tasks.db")
     monkeypatch.setattr(tasks, "TASK_STORE", store)
     monkeypatch.setattr(dashboard.agents.runtime, "health_check", lambda: {"status": "ready"})
@@ -43,7 +43,27 @@ def test_dashboard_diagnostics_reports_task_store(monkeypatch, tmp_path: Path):
 
     payload = dashboard.dashboard_diagnostics()
 
-    assert [check["status"] for check in payload["checks"]] == ["pass", "pass", "pass"]
+    assert [check["status"] for check in payload["checks"]] == ["pass", "pass", "pass", "pass"]
+    assert [check["name"] for check in payload["checks"]] == [
+        "Task Store", "Agent Worker", "Worker Registry", "Execution Fence Ledger"
+    ]
+
+
+def test_dashboard_diagnostics_fails_when_execution_ledger_unavailable(monkeypatch, tmp_path: Path):
+    store = TaskStore(tmp_path / "tasks.db")
+    monkeypatch.setattr(tasks, "TASK_STORE", store)
+    monkeypatch.setattr(dashboard.agents.runtime, "health_check", lambda: {"status": "ready"})
+    monkeypatch.setattr(dashboard.workers, "list_workers", lambda: {"workers": []})
+
+    class BrokenLedger:
+        def __init__(self, path):
+            raise RuntimeError("ledger unavailable")
+
+    monkeypatch.setattr(dashboard, "ExecutionLedger", BrokenLedger)
+    payload = dashboard.dashboard_diagnostics()
+
+    assert payload["checks"][-1]["name"] == "Execution Fence Ledger"
+    assert payload["checks"][-1]["status"] == "fail"
 
 
 def test_completed_resume_is_single_source_of_truth_in_main_dashboard():

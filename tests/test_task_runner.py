@@ -132,6 +132,7 @@ def test_runner_requires_exact_content_evidence_for_exact_file_task(tmp_path):
 def test_runner_rejects_unexpected_mutation_for_restricted_task(tmp_path):
     store = TaskStore(tmp_path / "tasks.db")
     seed(store, prompt="Create requested.txt. Do not modify or delete any other files.")
+    store.update("task-1", metadata={"command": "agent.execute", "timeout_seconds": None, "max_retries": 0})
     result = {
         "execution_mode": "agentic",
         "result": {

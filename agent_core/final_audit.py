@@ -1,4 +1,4 @@
-"""Static consistency checks for the autonomous mission layer."""
+"""Cross-component final consistency checks for the production agent platform."""
 
 from __future__ import annotations
 
@@ -25,6 +25,11 @@ class FinalPlatformAudit:
         "agent_core.adaptive_planner",
         "agent_core.acceptance",
         "agent_core.autonomous_developer",
+        "agent_core.execution_fence",
+        "backend.storage.execution_ledger",
+        "backend.storage.side_effect_ledger",
+        "backend.recovery_sweep",
+        "backend.safe_task_runner",
     )
 
     def audit_module_names(self, available_modules: Iterable[str]) -> AuditResult:
@@ -41,6 +46,23 @@ class FinalPlatformAudit:
 
     @staticmethod
     def audit_completion_contract(*, status: str, verified: bool, blockers: list[str]) -> AuditResult:
-        checks = {"verified": verified, "no_blockers": not blockers, "status_consistent": status == "completed" if verified else status != "completed"}
+        checks = {
+            "verified": verified,
+            "no_blockers": not blockers,
+            "status_consistent": status == "completed" if verified else status != "completed",
+        }
+        findings = [name for name, passed in checks.items() if not passed]
+        return AuditResult(not findings, checks, findings)
+
+    @staticmethod
+    def audit_execution_contract(*, execution_state: str, task_status: str, fenced: bool) -> AuditResult:
+        """Ensure durable execution state cannot claim completion without fencing."""
+        execution_state = str(execution_state).lower()
+        task_status = str(task_status).lower()
+        checks = {
+            "fenced": bool(fenced),
+            "committed_implies_completed": execution_state != "committed" or task_status == "completed",
+            "completed_implies_committed": task_status != "completed" or execution_state == "committed",
+        }
         findings = [name for name, passed in checks.items() if not passed]
         return AuditResult(not findings, checks, findings)

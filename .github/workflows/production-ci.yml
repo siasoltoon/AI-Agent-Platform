@@ -8,11 +8,16 @@ on:
       - feature/dashboard-production-v2
       - feature/final-platform-hardening
       - feature/final-agent-hardening
+      - feature/pro-agent-foundation
+      - feature/mission-orchestrator-v1
+      - feature/worker-lease-recovery-v1
+      - feature/execution-ledger-fencing-v1
   pull_request:
     branches:
       - main
       - feature/final-platform-hardening
       - feature/final-agent-hardening
+      - feature/pro-agent-foundation
 
 jobs:
   backend:

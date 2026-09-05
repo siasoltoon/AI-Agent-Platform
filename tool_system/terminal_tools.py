@@ -2,137 +2,103 @@
 
 from __future__ import annotations
 
+import json
+import os
 import shlex
-import subprocess
 from pathlib import Path
 from typing import Any
 
+from agent_core.execution_fence import ExecutionFence
+from agent_core.network_policy import NetworkPolicy
+from agent_core.security_boundary import WorkspaceBoundary
 from .base_tool import BaseTool
+from .process_runner import IsolatedProcessRunner, ProcessLimits
 
 
 class TerminalTool(BaseTool):
     name = "terminal"
-
-    _ALLOWED = {
-        "python", "py", "pytest", "pip", "pip3", "git", "uvicorn", "ruff", "black", "mypy",
-        "node", "npm", "npm.cmd", "npx", "vite", "yarn", "pnpm",
-        "dir", "ls", "pwd", "type", "cat", "more", "where", "findstr", "fc", "tree", "echo",
-        "mkdir", "mktemp", "whoami", "hostname", "ver", "date", "time",
-        "dotnet", "java", "javac", "go", "cargo", "rustc",
-        "pytest.exe", "python.exe", "node.exe", "npm.exe", "git.exe",
-    }
-    _ALIASES = {
-        "npm.cmd": "npm", "pytest.exe": "pytest", "python.exe": "python",
-        "node.exe": "node", "npm.exe": "npm", "git.exe": "git",
-    }
-    _BLOCKED_COMMANDS = {
-        "del", "erase", "format", "shutdown", "restart", "taskkill", "diskpart", "reg",
-        "powershell", "pwsh", "cmd", "rmdir", "rd", "rm", "sudo", "chmod", "chown",
-    }
+    _ALLOWED = {"python", "py", "pytest", "pip", "pip3", "git", "uvicorn", "ruff", "black", "mypy", "node", "npm", "npm.cmd", "npx", "vite", "yarn", "pnpm", "dir", "ls", "pwd", "type", "cat", "more", "where", "findstr", "fc", "tree", "echo", "mkdir", "mktemp", "whoami", "hostname", "ver", "date", "time", "dotnet", "java", "javac", "go", "cargo", "rustc", "pytest.exe", "python.exe", "node.exe", "npm.exe", "git.exe"}
+    _BLOCKED_COMMANDS = {"del", "erase", "format", "shutdown", "restart", "taskkill", "diskpart", "reg", "powershell", "pwsh", "cmd", "rmdir", "rd", "rm", "sudo", "chmod", "chown"}
     _SHELL_OPERATORS = frozenset(";&|><`")
+    _SAFE_ENV_KEYS = frozenset({"PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "TMPDIR", "HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "LANG", "LC_ALL", "LC_CTYPE", "VIRTUAL_ENV"})
     MAX_OUTPUT_CHARS = 12_000
 
-    def __init__(self, workspace_root: str | Path | None = None) -> None:
-        self.workspace = Path(workspace_root or Path.cwd()).resolve()
+    def __init__(self, workspace_root: str | Path | None = None, network_policy: NetworkPolicy | None = None, execution_fence: ExecutionFence | None = None) -> None:
+        self.workspace = Path(workspace_root or Path.cwd()).resolve(); self._boundary = WorkspaceBoundary(self.workspace); self.network_policy = network_policy or NetworkPolicy(); self.execution_fence = execution_fence; self._runner = IsolatedProcessRunner(environment=self._safe_environment(), network_sandbox=self._network_sandbox())
 
+    def _network_sandbox(self):
+        from agent_core.network_sandbox import NetworkSandbox
+        if self.network_policy.mode == "native": return NetworkSandbox("native")
+        return NetworkSandbox("command-policy")
     @staticmethod
     def _truncate(value: str) -> str:
-        if len(value) <= TerminalTool.MAX_OUTPUT_CHARS:
-            return value
-        omitted = len(value) - TerminalTool.MAX_OUTPUT_CHARS
-        return value[: TerminalTool.MAX_OUTPUT_CHARS] + f"\n...<truncated {omitted} chars>"
-
+        if len(value) <= TerminalTool.MAX_OUTPUT_CHARS: return value
+        omitted = len(value) - TerminalTool.MAX_OUTPUT_CHARS; return value[: TerminalTool.MAX_OUTPUT_CHARS] + f"\n...<truncated {omitted} chars>"
     @classmethod
     def _contains_blocked_shell_syntax(cls, command: str) -> bool:
-        quote: str | None = None
-        escaped = False
+        quote = None; escaped = False
         for char in command:
-            if escaped:
-                escaped = False
-                continue
-            if char == "\\" and quote != "'":
-                escaped = True
-                continue
+            if escaped: escaped = False; continue
+            if char == "\\" and quote != "'": escaped = True; continue
             if quote:
-                if char == quote:
-                    quote = None
+                if char == quote: quote = None
                 continue
-            if char in {"'", '"'}:
-                quote = char
-                continue
-            if char in cls._SHELL_OPERATORS:
-                return True
+            if char in {"'", '"'}: quote = char; continue
+            if char in cls._SHELL_OPERATORS: return True
         return quote is not None
-
     @classmethod
     def _contains_blocked_command(cls, command: str) -> bool:
-        try:
-            tokens = shlex.split(command, posix=True)
-        except ValueError:
-            return True
+        try: tokens = shlex.split(command, posix=True)
+        except ValueError: return True
         return any(token.lower() in cls._BLOCKED_COMMANDS for token in tokens)
+    @classmethod
+    def _safe_environment(cls) -> dict[str, str]: return {key: value for key, value in os.environ.items() if key.upper() in cls._SAFE_ENV_KEYS}
+    def _safe_path(self, path: str | Path) -> Path: return self._boundary.assert_safe(path)
+    def _fence_begin(self, command: str, executable: str) -> str | None:
+        if self.execution_fence is None: return None
+        key, _ = self.execution_fence.begin_side_effect(executable, {"command": command, "workspace": str(self.workspace)}); return key
+    def _fence_replay(self, key: str | None) -> dict[str, Any] | None:
+        if self.execution_fence is None or key is None: return None
+        record = self.execution_fence.side_effects.get(key)
+        if record and record.get("state") == "committed" and record.get("result_json") is not None: return json.loads(record["result_json"])
+        return None
+    def _fence_commit(self, key: str | None, result: dict[str, Any]) -> dict[str, Any]:
+        if self.execution_fence is None or key is None: return result
+        return self.execution_fence.commit_side_effect(key, result)
 
     def execute(self, command: str, timeout: int = 120) -> dict[str, Any]:
         command = str(command).strip()
-        if not command:
-            raise ValueError("Terminal command cannot be empty.")
-        if timeout < 1 or timeout > 600:
-            raise ValueError("Terminal timeout must be between 1 and 600 seconds.")
-
-        executable = command.split()[0].strip('"\'').lower()
-        if executable not in self._ALLOWED:
-            raise PermissionError(f"Terminal command is not allowed: {executable}")
-        if self._contains_blocked_shell_syntax(command) or self._contains_blocked_command(command):
-            raise PermissionError("Terminal command contains a blocked operation.")
-
-        if executable == "type":
-            parts = shlex.split(command, posix=True)
-            target = parts[1] if len(parts) > 1 else ""
-            if not target or target.upper() == "NUL":
-                return {"stdout": "", "stderr": "", "code": 0, "timed_out": False}
-            path = Path(target)
-            try:
-                if path.is_file():
-                    return {"stdout": self._truncate(path.read_text(encoding="utf-8")), "stderr": "", "code": 0, "timed_out": False}
-            except OSError as exc:
-                return {"stdout": "", "stderr": str(exc), "code": 1, "timed_out": False}
-
-        if executable == "mkdir":
-            parts = shlex.split(command, posix=True)
-            targets = [part for part in parts[1:] if part not in {"-p", "--parents"}]
-            if not targets:
-                raise ValueError("mkdir requires a directory path.")
-            for target in targets:
-                path = Path(target)
-                resolved = path.resolve() if path.is_absolute() else (self.workspace / path).resolve()
-                if resolved != self.workspace and self.workspace not in resolved.parents:
-                    raise PermissionError("Terminal path escapes the configured workspace.")
-                resolved.mkdir(parents=True, exist_ok=True)
-            return {"stdout": "", "stderr": "", "code": 0, "timed_out": False}
-
+        if not command: raise ValueError("Terminal command cannot be empty.")
+        if timeout < 1 or timeout > 600: raise ValueError("Terminal timeout must be between 1 and 600 seconds.")
+        try: tokens = shlex.split(command, posix=True)
+        except ValueError as exc: raise PermissionError("Terminal command contains invalid shell syntax.") from exc
+        executable = tokens[0].strip('"\'').lower() if tokens else ""
+        if executable not in self._ALLOWED: raise PermissionError(f"Terminal command is not allowed: {executable}")
+        if self._contains_blocked_shell_syntax(command) or self._contains_blocked_command(command): raise PermissionError("Terminal command contains a blocked operation.")
+        self.network_policy.check_command(executable, command); network_evidence = self.network_policy.evidence(executable, allowed=True); key = self._fence_begin(command, executable)
+        replay = self._fence_replay(key)
+        if replay is not None: return replay
         try:
-            result = subprocess.run(
-                command,
-                shell=True,
-                cwd=str(self.workspace),
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as exc:
-            stdout = exc.stdout if isinstance(exc.stdout, str) else ""
-            stderr = exc.stderr if isinstance(exc.stderr, str) else ""
-            return {
-                "stdout": self._truncate(stdout),
-                "stderr": self._truncate(stderr or f"Command timed out after {timeout} seconds."),
-                "code": 124,
-                "timed_out": True,
-                "timeout_seconds": timeout,
-            }
-        return {
-            "stdout": self._truncate(result.stdout),
-            "stderr": self._truncate(result.stderr),
-            "code": result.returncode,
-            "timed_out": False,
-        }
+            if self.execution_fence is not None: self.execution_fence.assert_current()
+            if executable == "type":
+                target = tokens[1] if len(tokens) > 1 else ""
+                if not target or target.upper() == "NUL": return self._fence_commit(key, {"stdout": "", "stderr": "", "code": 0, "timed_out": False, "network_policy": network_evidence, "network_isolation": self._runner.network_isolation()})
+                path = self._safe_path(target)
+                try:
+                    if path.is_file(): return self._fence_commit(key, {"stdout": self._truncate(path.read_text(encoding="utf-8")), "stderr": "", "code": 0, "timed_out": False, "network_policy": network_evidence, "network_isolation": self._runner.network_isolation()})
+                    return self._fence_commit(key, {"stdout": "", "stderr": "", "code": 1, "timed_out": False, "network_policy": network_evidence, "network_isolation": self._runner.network_isolation()})
+                except OSError as exc: return self._fence_commit(key, {"stdout": "", "stderr": str(exc), "code": 1, "timed_out": False, "network_policy": network_evidence, "network_isolation": self._runner.network_isolation()})
+            if executable == "mkdir":
+                targets = [part for part in tokens[1:] if part not in {"-p", "--parents"}]
+                if not targets: raise ValueError("mkdir requires a directory path.")
+                for target in targets: self._safe_path(target).mkdir(parents=True, exist_ok=True)
+                return self._fence_commit(key, {"stdout": "", "stderr": "", "code": 0, "timed_out": False, "network_policy": network_evidence, "network_isolation": self._runner.network_isolation()})
+            should_terminate = None
+            if self.execution_fence is not None: should_terminate = lambda: not self.execution_fence.ledger.fence_check(self.execution_fence.task_id, self.execution_fence.execution_id, self.execution_fence.fencing_token)
+            result_stdout, result_stderr, returncode, timed_out = self._runner.run(tokens, cwd=str(self.workspace), limits=ProcessLimits(timeout_seconds=timeout, max_output_chars=self.MAX_OUTPUT_CHARS), should_terminate=should_terminate)
+            if self.execution_fence is not None: self.execution_fence.assert_current()
+            result = {"stdout": self._truncate(result_stdout), "stderr": self._truncate(result_stderr), "code": returncode, "timed_out": timed_out, **({"timeout_seconds": timeout} if timed_out else {}), "process_isolation": "new_process_group", "native_os_isolation": self._runner.isolation_mode(), "environment_policy": "allowlist", "network_policy": network_evidence, "network_isolation": self._runner.network_isolation(), "shell": False}
+            return self._fence_commit(key, result)
+        except Exception as exc:
+            if self.execution_fence is not None and key is not None: self.execution_fence.mark_ambiguous(key, str(exc))
+            raise

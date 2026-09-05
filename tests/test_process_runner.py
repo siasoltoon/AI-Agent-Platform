@@ -1,0 +1,71 @@
+import os
+import sys
+
+import pytest
+
+from tool_system.process_runner import IsolatedProcessRunner, ProcessLimits
+from tool_system.terminal_tools import TerminalTool
+
+
+def test_terminal_uses_argument_vector_without_shell(tmp_path):
+    result = TerminalTool(workspace_root=tmp_path).execute("python --version", timeout=10)
+    assert result["code"] == 0
+    assert result["shell"] is False
+    assert result["process_isolation"] == "new_process_group"
+
+
+def test_terminal_environment_is_allowlisted(monkeypatch):
+    monkeypatch.setenv("MISSION_TEST_SECRET_TOKEN", "must-not-leak")
+    environment = TerminalTool._safe_environment()
+    assert "MISSION_TEST_SECRET_TOKEN" not in environment
+    assert all(key.upper() in TerminalTool._SAFE_ENV_KEYS for key in environment)
+
+
+def test_process_runner_timeout_kills_process_group(tmp_path):
+    runner = IsolatedProcessRunner(environment={"PATH": os.environ.get("PATH", "")})
+    command = [sys.executable, "-c", "import time; time.sleep(10)"]
+    stdout, stderr, code, timed_out = runner.run(
+        command,
+        cwd=str(tmp_path),
+        limits=ProcessLimits(timeout_seconds=1, max_output_chars=1000),
+    )
+    assert stdout == ""
+    assert code == 124
+    assert timed_out is True
+    assert "timed out" in stderr
+
+
+def test_process_runner_bounds_stdout_and_continues_draining(tmp_path):
+    runner = IsolatedProcessRunner(environment={"PATH": os.environ.get("PATH", "")})
+    command = [sys.executable, "-c", "print('x' * 2000000)"]
+    stdout, stderr, code, timed_out = runner.run(
+        command,
+        cwd=str(tmp_path),
+        limits=ProcessLimits(timeout_seconds=5, max_output_chars=1000),
+    )
+    assert code == 0
+    assert stderr == ""
+    assert len(stdout) <= 1030
+    assert "process output truncated" in stdout
+
+
+def test_process_limits_require_positive_values():
+    with pytest.raises(ValueError):
+        ProcessLimits(timeout_seconds=0, max_output_chars=1000)
+    with pytest.raises(ValueError):
+        ProcessLimits(timeout_seconds=1, max_output_chars=0)
+    with pytest.raises(ValueError):
+        ProcessLimits(timeout_seconds=1, max_output_chars=1000, max_cpu_seconds=0)
+    with pytest.raises(ValueError):
+        ProcessLimits(timeout_seconds=1, max_output_chars=1000, max_memory_bytes=0)
+    with pytest.raises(ValueError):
+        ProcessLimits(timeout_seconds=1, max_output_chars=1000, max_processes=0)
+
+
+def test_process_runner_exposes_resource_preexec_on_posix():
+    limits = ProcessLimits(timeout_seconds=5, max_output_chars=1000)
+    hook = IsolatedProcessRunner._resource_preexec(limits)
+    if os.name == "nt":
+        assert hook is None
+    else:
+        assert callable(hook)

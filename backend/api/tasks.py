@@ -9,7 +9,11 @@ import uuid
 
 from fastapi import APIRouter, HTTPException
 
+from agent_core.mission_memory import MissionMemoryStore
+from agent_core.mission_service import MissionService
 from agent_core.runtime import AgentRuntime
+from backend.storage.execution_ledger import ExecutionLedger
+from backend.storage.mission_store import SQLiteMissionStore
 from backend.storage.task_store import TaskQueueCapacityError, TaskStore
 from config.production_config import CONFIG
 from task_engine.contracts import TaskRequest, TaskResponse, TaskStatus
@@ -23,14 +27,29 @@ runtime = AgentRuntime()
 command_registry = CommandRegistry()
 task_router = TaskRouter(command_registry)
 TASK_STORE = TaskStore(os.getenv("TASK_DB_PATH", "data/tasks.db"))
+EXECUTION_LEDGER = ExecutionLedger(TASK_STORE.path)
+MISSION_STORE = SQLiteMissionStore(os.getenv("TASK_DB_PATH", "data/tasks.db"))
 TASK_RUNNER = None
+mission_service = MissionService(runtime=runtime, memory_store=MissionMemoryStore(MISSION_STORE), task_store=TASK_STORE)
 
 
 def _execute_agent_task(task: TaskRequest, *, task_id: str) -> dict:
     return runtime.execute(prompt=task.prompt, model=task.model, task_id=task_id, timeout_seconds=task.timeout_seconds, metadata=task.metadata)
 
 
+def _execute_mission_task(task: TaskRequest, *, task_id: str) -> dict:
+    """Dispatch explicitly requested professional missions through the real orchestrator."""
+    return mission_service.execute(
+        task.prompt,
+        task_id=task_id,
+        model=task.model,
+        timeout_seconds=task.timeout_seconds,
+        metadata=task.metadata,
+    )
+
+
 command_registry.register("agent.execute", _execute_agent_task)
+command_registry.register("mission.execute", _execute_mission_task)
 
 
 async def _create_task(task: TaskRequest) -> TaskResponse:
@@ -91,6 +110,37 @@ async def get_task_events(task_id: str) -> dict:
     return {"task_id": task_id, "events": TASK_STORE.events(task_id)}
 
 
+@router.get("/{task_id}/executions")
+async def get_task_executions(task_id: str, limit: int = 100) -> dict:
+    """Expose bounded execution-attempt history for recovery and audit tooling."""
+    if TASK_STORE.get(task_id) is None:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    return {"task_id": task_id, "attempts": EXECUTION_LEDGER.list_attempts(task_id, limit=limit)}
+
+
+@router.get("/{task_id}/mission")
+async def get_mission_audit(task_id: str, event_limit: int = 100) -> dict:
+    """Expose the durable professional-mission state and bounded lifecycle event history."""
+    try:
+        snapshot = mission_service.inspect(task_id, event_limit=event_limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="Mission not found.")
+    return snapshot
+
+
+@router.post("/{task_id}/reconcile")
+async def reconcile_mission_task(task_id: str) -> dict:
+    """Reconcile TaskStore and MissionStore without automatically replaying work."""
+    try:
+        return mission_service.reconcile(task_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Task not found.") from exc
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.post("/{task_id}/cancel", response_model=TaskResponse)
 async def cancel_task(task_id: str) -> TaskResponse:
     logger.warning("[CANCEL] backend endpoint entered task_id=%s", task_id)
@@ -99,6 +149,15 @@ async def cancel_task(task_id: str) -> TaskResponse:
     except KeyError as exc:
         logger.warning("[CANCEL] backend task not found task_id=%s", task_id)
         raise HTTPException(status_code=404, detail="Task not found.") from exc
+
+    command = str(task.get("metadata", {}).get("command", ""))
+    if command == "mission.execute":
+        logger.warning("[CANCEL] routing professional mission through MissionService task_id=%s", task_id)
+        try:
+            mission_result = mission_service.cancel(task_id, objective=task.get("prompt"))
+            logger.warning("[CANCEL] mission orchestrator cancellation finished task_id=%s result=%s", task_id, mission_result)
+        except ValueError as exc:
+            logger.warning("[CANCEL] mission memory cancellation could not be persisted task_id=%s error=%s", task_id, exc)
 
     logger.warning("[CANCEL] backend store cancelled task_id=%s status=%s", task_id, task.get("status"))
     logger.warning("[CANCEL] backend propagating to worker task_id=%s worker_base_url=%s", task_id, runtime.worker_client.base_url)

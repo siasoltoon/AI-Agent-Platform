@@ -39,6 +39,7 @@ class ExecutionEvidence:
     retries: int = 0
     recovery_attempts: int = 0
     ambiguous_outcomes: int = 0
+    security_violations: int = 0
     tool_outcomes: dict[str, int] = field(default_factory=dict)
     budget_exceeded: str | None = None
 
@@ -57,6 +58,8 @@ class ExecutionEvidence:
             self.timeout_count += 1
         if result.get("ambiguous") is True or result.get("outcome") == "ambiguous":
             self.ambiguous_outcomes += 1
+        if _is_security_violation(result):
+            self.security_violations += 1
         self.output_chars += max(0, int(output_chars))
         if truncated:
             self.output_truncations += 1
@@ -86,6 +89,19 @@ class ExecutionEvidence:
         return payload
 
 
+def _is_security_violation(record: dict[str, Any]) -> bool:
+    if record.get("policy_violation") is True or record.get("security_violation") is True:
+        return True
+    if record.get("error_type") in {"PermissionError", "MissionPolicyViolation", "SecurityViolation"}:
+        return True
+    payload = record.get("result")
+    return isinstance(payload, dict) and (
+        payload.get("policy_violation") is True
+        or payload.get("security_violation") is True
+        or payload.get("error_type") in {"PermissionError", "MissionPolicyViolation", "SecurityViolation"}
+    )
+
+
 def enrich_execution_evidence(
     result: dict[str, Any],
     *,
@@ -103,6 +119,7 @@ def enrich_execution_evidence(
     successful = 0
     failed = 0
     truncations = 0
+    security_violations = 0
     for record in records:
         if not isinstance(record, dict):
             continue
@@ -120,6 +137,8 @@ def enrich_execution_evidence(
                 ambiguous += 1
         if record.get("output_truncated") is True:
             truncations += 1
+        if _is_security_violation(record):
+            security_violations += 1
         output_chars += len(str(payload)) if payload is not None else len(str(record.get("error", "")))
 
     merged = dict(evidence)
@@ -134,6 +153,7 @@ def enrich_execution_evidence(
         "retries": retries,
         "recovery_attempts": recovery_attempts,
         "ambiguous_outcomes": ambiguous,
+        "security_violations": security_violations,
         "tool_outcomes": tool_outcomes,
         "elapsed_seconds": max(0.0, monotonic() - started_at),
     })
