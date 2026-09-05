@@ -37,6 +37,10 @@ This document defines the engineering direction for heavy autonomous software mi
 - Cancellation from the Task API must traverse the professional MissionService for `mission.execute` tasks so mission memory reaches a durable terminal state and records the cancellation event; worker cancellation remains the final execution-layer signal.
 - Production controller instances persist mission snapshots in the same SQLite database used by the task control plane, so mission state survives controller restart instead of relying only on process-local memory.
 - Durable mission loads prefer the external persistence adapter over the local cache, preventing a stale process-local snapshot from overriding newer state written by another controller instance.
+- Active execution outcomes are explicit: `running`, `interrupted`, `ambiguous`, and `committed`. A task is advanced only from a committed, independently verified outcome.
+- Worker/process exceptions persist an `interrupted` outcome before the exception is propagated to the bounded recovery loop; unverified returns persist an `ambiguous` outcome so a later resume never treats an unverified response as proof of completion.
+- Resume reconciliation is conservative: only a matching, independently verified committed execution can advance the graph. Interrupted or ambiguous executions remain uncommitted and receive an explicit recovery checkpoint before retry.
+- The durable memory adapter protects a stronger execution outcome from being overwritten by a stale in-process snapshot when concurrent/restarted control paths save mission state.
 - The platform should prefer deterministic gates for safety-critical decisions and use the model for planning, implementation, diagnosis, and adaptation.
 
 ## Current architecture
@@ -64,5 +68,7 @@ The orchestrator also persists an ordered lifecycle event stream (`contract -> r
 The mission service exposes a read-only inspection surface at `GET /tasks/{task_id}/mission`. It returns the durable mission snapshot plus `event_count` and a bounded event suffix (`event_limit`, 1–1000). A truncated response is explicitly marked with `events_truncated` so operators never mistake a bounded view for the complete history.
 
 Production task dispatch now wires MissionService to `SQLiteMissionStore` using the controller's `TASK_DB_PATH`. The store atomically upserts complete mission snapshots, supports bounded status-filtered listing, and shares the controller database without changing the TaskStore schema.
+
+Execution recovery now records the outcome around the external runtime boundary. Before side effects, the exact execution ID is persisted as `running`. Exceptions become `interrupted`; returns without independently verified evidence become `ambiguous`; verified results become `committed`. This makes crash/retry behavior observable and prevents recovery code from silently promoting an uncertain execution into completed graph state.
 
 The architecture is intentionally incremental. Each hardening stage must preserve the existing production path and add executable evidence rather than creating parallel fake implementations.
