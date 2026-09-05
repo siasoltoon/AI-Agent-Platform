@@ -137,6 +137,7 @@ class IsolatedProcessRunner:
                 job.attach(process)
             except Exception:
                 self._kill_process_tree(process)
+                job.close()
                 raise
 
         stdout_chunks: list[str] = []
