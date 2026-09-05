@@ -12,6 +12,7 @@ from agent_core.execution_agent import AgentExecutionError, AgentExecutor
 from agent_core.execution_evidence import ExecutionBudget, enrich_execution_evidence
 from agent_core.execution_fence import ExecutionFence
 from agent_core.network_policy import NetworkPolicy
+from agent_core.verification import verify_execution
 from backend.services.ollama_service import OllamaService
 from tool_system.file_tools import (
     CopyFileTool, DeleteFileTool, MakeDirectoryTool, MoveFileTool, WriteFileTool,
@@ -97,12 +98,20 @@ class ReliableAgentExecutor:
         if result.get("status") != "completed": blockers.append("agent_status_not_completed")
         if evidence.get("verified") is not True: blockers.append("execution_evidence_not_verified")
         if not successful: blockers.append("no_successful_tool_action")
+        independent = verify_execution(result)
+        if not independent.verified:
+            blockers.extend(f"independent_verification:{name}" for name in independent.blockers)
         tools = {str(record.get("tool", "")).lower() for record in successful}
         terminal_records = [record for record in successful if str(record.get("tool", "")).lower() == "terminal" or str(record.get("tool", "")).lower() in {"pytest", "python", "py", "pip", "npm", "node", "ruff", "mypy", "black", "vite"}]
         if requirements["tests"] and not any(cls._terminal_succeeded(record) and ("pytest" in cls._command(record).lower() or ("test" in cls._command(record).lower() and any(token in cls._command(record).lower() for token in ("python", "py", "npm", "yarn", "pnpm", "cargo", "go")))) for record in terminal_records): blockers.append("requested_tests_not_executed_successfully")
         if requirements["build"] and not any(cls._terminal_succeeded(record) and any(token in cls._command(record).lower() for token in ("build", "compile", "py_compile")) for record in terminal_records): blockers.append("requested_build_or_compile_not_executed_successfully")
         if requirements["inspect"] and not (tools & {"read_file", "list_directory", "search_files", "file_exists", "directory_exists", "terminal"}): blockers.append("requested_inspection_not_observed")
         return not blockers, blockers
+
+    @staticmethod
+    def _verification_snapshot(result: dict[str, Any]) -> dict[str, Any]:
+        verification = verify_execution(result)
+        return {"verified": verification.verified, "score": verification.score, "checks": verification.checks, "blockers": verification.blockers}
 
     def _continuation_prompt(self, prompt: str, attempt: int, error: str, result: dict[str, Any] | None) -> str:
         summary = ""
@@ -159,7 +168,7 @@ The goal of this recovery attempt is to finish the ORIGINAL MISSION, not to expl
                 elif evidence.get("elapsed_seconds", 0) >= self.budget.max_runtime_seconds: budget_reason = "max_runtime_seconds"
                 if budget_reason:
                     result["status"] = "blocked"; result["execution_evidence"]["budget_exceeded"] = budget_reason; last_error = f"Execution budget exceeded: {budget_reason}"; attempt_records.append({"attempt": attempt, "accepted": False, "blocker": budget_reason}); break
-                accepted, blockers = self._quality_gate(original, result); attempt_records.append({"attempt": attempt, "accepted": accepted, "blockers": blockers})
+                accepted, blockers = self._quality_gate(original, result); result["verification"] = self._verification_snapshot(result); attempt_records.append({"attempt": attempt, "accepted": accepted, "blockers": blockers})
                 if accepted:
                     result["reliability"] = {"attempts": attempt, "self_repaired": attempt > 1, "quality_gate": "passed", "attempt_history": attempt_records}; return result
                 last_error = "Completion quality gate rejected the attempt: " + ", ".join(blockers)
@@ -171,5 +180,5 @@ The goal of this recovery attempt is to finish the ORIGINAL MISSION, not to expl
                 if not isinstance(partial, dict): break
         evidence = self._evidence(last_result) if isinstance(last_result, dict) else {}
         if isinstance(last_result, dict):
-            last_result["reliability"] = {"attempts": len(attempt_records), "self_repaired": len(attempt_records) > 1, "quality_gate": "blocked", "attempt_history": attempt_records}; last_result["execution_evidence"] = evidence
+            last_result["reliability"] = {"attempts": len(attempt_records), "self_repaired": len(attempt_records) > 1, "quality_gate": "blocked", "attempt_history": attempt_records}; last_result["execution_evidence"] = evidence; last_result["verification"] = self._verification_snapshot(last_result)
         raise AgentExecutionError(f"Agent could not complete the task within execution budgets after {len(attempt_records)} attempts. Last failure: {last_error or 'execution budget exhausted'}", partial_result=last_result)
