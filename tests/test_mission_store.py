@@ -30,3 +30,17 @@ def test_sqlite_mission_store_lists_bounded_status_filtered_snapshots(tmp_path):
 
     assert len(completed) == 1
     assert completed[0]["status"] == "completed"
+
+
+def test_mission_memory_store_prefers_external_snapshot_over_stale_local_cache(tmp_path):
+    store = SQLiteMissionStore(tmp_path / "missions.db")
+    first = MissionMemoryStore(store)
+    first.save(MissionMemory("m1", "Implement a feature", status="running"))
+
+    second = MissionMemoryStore(store)
+    second.save(MissionMemory("m1", "Implement a feature", status="completed"))
+
+    restored = first.load("m1")
+
+    assert restored is not None
+    assert restored.status == "completed"
