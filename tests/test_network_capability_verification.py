@@ -45,6 +45,11 @@ def test_verification_rejects_native_contract_without_native_enforcement():
 
 
 def test_verification_accepts_native_contract_with_enforcement():
-    result = _base("native", "native", isolation={"mode": "native", "enforced": True})
+    result = _base("native", "native")
+    result["tool_records"] = [{
+        "tool": "terminal",
+        "ok": True,
+        "result": {"network_isolation": {"mode": "native", "enforced": True}},
+    }]
     verification = verify_execution(result)
     assert verification.verified
