@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
@@ -62,7 +63,7 @@ class SafeTaskRunner(TaskRunner):
             if self.recovery_sweep is not None:
                 self.recovery_sweep.sweep(limit=500)
             else:
-                RecoverySweep(self.store, self.lease_store).sweep(limit=500)
+                RecoverySweep(self.store, self.lease_store, execution_ledger=self.execution_ledger).sweep(limit=500)
             self._stop.clear()
             self._shutdown_timed_out = False
             self._thread = threading.Thread(target=self._run, name="task-runner", daemon=True)
@@ -124,6 +125,7 @@ class SafeTaskRunner(TaskRunner):
         """Execute only while this controller owns a renewable durable lease."""
         task_id = record["id"]
         execution_id = str(uuid.uuid4())
+        original_store = self.store
         if not self.lease_store.acquire(
             task_id,
             self.worker_id,
@@ -150,17 +152,16 @@ class SafeTaskRunner(TaskRunner):
             if state == "committed":
                 stored_result = attempt.get("result_json")
                 if stored_result:
-                    import json
-                    current = self.store.get(task_id) or record
+                    current = original_store.get(task_id) or record
                     metadata = dict(current.get("metadata", {}))
                     metadata.update({"execution_id": attempt["execution_id"], "fencing_token": attempt["fencing_token"], "idempotent_replay": True})
-                    self.store.update(task_id, status=TaskStatus.COMPLETED.value, completed_at=time.time(), result=json.loads(stored_result), error=None, metadata=metadata)
+                    original_store.update(task_id, status=TaskStatus.COMPLETED.value, completed_at=time.time(), result=json.loads(stored_result), error=None, metadata=metadata)
                     return
             self._fail_or_retry(task_id, record, "Execution idempotency request is already owned by another attempt.")
             return
 
         fencing_token = int(attempt["fencing_token"])
-        current = self.store.get(task_id) or record
+        current = original_store.get(task_id) or record
         metadata = dict(current.get("metadata", {}))
         metadata.update(
             {
@@ -173,7 +174,7 @@ class SafeTaskRunner(TaskRunner):
             }
         )
         if current.get("status") == TaskStatus.RUNNING.value:
-            self.store.update(task_id, metadata=metadata)
+            original_store.update(task_id, metadata=metadata)
         leased_record = dict(record)
         leased_record["metadata"] = metadata
 
@@ -221,7 +222,7 @@ class SafeTaskRunner(TaskRunner):
         class FencedStore:
             """Delegate all TaskStore operations except fenced completion."""
             def __getattr__(inner_self, name):
-                return getattr(self.store, name)
+                return getattr(original_store, name)
 
             def update(inner_self, update_task_id: str, **changes):
                 if update_task_id == task_id and changes.get("status") == TaskStatus.COMPLETED.value:
@@ -234,10 +235,9 @@ class SafeTaskRunner(TaskRunner):
                     )
                     if not ok:
                         raise RuntimeError("Execution fence rejected completion because a newer attempt owns the task.")
-                    return self.store.get(task_id)
-                return self.store.update(update_task_id, **changes)
+                    return original_store.get(task_id)
+                return original_store.update(update_task_id, **changes)
 
-        original_store = self.store
         self.store = FencedStore()
         try:
             super()._execute(leased_record)
@@ -248,7 +248,8 @@ class SafeTaskRunner(TaskRunner):
             heartbeat_thread.join(timeout=max(1.0, self.heartbeat_seconds + 0.5))
             current_attempt = ledger.get(execution_id)
             if current_attempt and current_attempt.get("state") == "running":
-                if self.store.get(task_id) and self.store.get(task_id).get("status") == TaskStatus.COMPLETED.value:
+                current_task = original_store.get(task_id)
+                if current_task and current_task.get("status") == TaskStatus.COMPLETED.value:
                     ledger.transition(execution_id, "committed")
                 else:
                     ledger.transition(execution_id, "interrupted", error="Execution ended without a durable completion commit.")
