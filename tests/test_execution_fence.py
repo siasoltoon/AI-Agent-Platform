@@ -46,6 +46,21 @@ def test_side_effect_idempotency_is_scoped_to_task(tmp_path):
     assert effects.get(key2)["task_id"] == "task-2"
 
 
+def test_side_effect_rejects_request_hash_mismatch(tmp_path):
+    db = tmp_path / "tasks.db"
+    ledger = ExecutionLedger(db)
+    effects = SideEffectLedger(db)
+    ledger.begin("task-1", "worker-1", execution_id="exec-1")
+    fence = ExecutionFence(task_id="task-1", execution_id="exec-1", fencing_token=1, ledger=ledger, side_effects=effects)
+    key, _ = fence.begin_side_effect("write_file", {"path": "a.txt", "content": "hello"})
+    effects._connect
+    with sqlite3.connect(db) as connection:
+        connection.execute("UPDATE side_effects SET request_hash=? WHERE idempotency_key=?", ("tampered", key))
+        connection.commit()
+    with pytest.raises(ExecutionFenceError, match="collision"):
+        fence.begin_side_effect("write_file", {"path": "a.txt", "content": "hello"})
+
+
 def test_stale_execution_cannot_begin_side_effect(tmp_path):
     db = tmp_path / "tasks.db"
     ledger = ExecutionLedger(db)
@@ -69,6 +84,34 @@ def test_ambiguous_side_effect_is_not_replayed(tmp_path):
 
     with pytest.raises(ExecutionFenceError, match="ambiguous"):
         fence.begin_side_effect("move_file", {"source": "a", "destination": "b"})
+
+
+def test_failed_side_effect_is_not_replayed(tmp_path):
+    db = tmp_path / "tasks.db"
+    ledger = ExecutionLedger(db)
+    effects = SideEffectLedger(db)
+    ledger.begin("task-1", "worker-1", execution_id="exec-1")
+    fence = ExecutionFence(task_id="task-1", execution_id="exec-1", fencing_token=1, ledger=ledger, side_effects=effects)
+    key, _ = fence.begin_side_effect("move_file", {"source": "a", "destination": "b"})
+    effects.transition(key, "failed", error="validation failed")
+
+    with pytest.raises(ExecutionFenceError, match="previously failed"):
+        fence.begin_side_effect("move_file", {"source": "a", "destination": "b"})
+
+
+def test_side_effect_commit_rejects_changed_owner(tmp_path):
+    db = tmp_path / "tasks.db"
+    ledger = ExecutionLedger(db)
+    effects = SideEffectLedger(db)
+    ledger.begin("task-1", "worker-1", execution_id="exec-1")
+    fence = ExecutionFence(task_id="task-1", execution_id="exec-1", fencing_token=1, ledger=ledger, side_effects=effects)
+    key, _ = fence.begin_side_effect("write_file", {"path": "a.txt", "content": "hello"})
+    ledger.begin("task-1", "worker-2", execution_id="exec-2")
+
+    with pytest.raises(ExecutionFenceError, match="no longer current"):
+        fence.commit_side_effect(key, {"ok": True})
+
+    assert effects.get(key)["state"] == "running"
 
 
 def test_missing_copy_source_is_failed_not_ambiguous(tmp_path):
