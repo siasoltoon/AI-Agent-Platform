@@ -60,6 +60,36 @@ def _record_is_security_violation(record: Any) -> bool:
     )
 
 
+_NETWORK_RANK = {"deny": 0, "restricted": 1, "native": 2, "allow": 3}
+
+
+def _network_capability_compliant(result: dict[str, Any], evidence: dict[str, Any]) -> bool:
+    contract = result.get("mission_contract")
+    if not isinstance(contract, dict) or "network_access" not in contract:
+        return True
+    expected = str(contract.get("network_access") or "restricted").strip().lower()
+    if expected not in _NETWORK_RANK:
+        return False
+    capability = result.get("network_capability")
+    if not isinstance(capability, dict):
+        capability = evidence.get("network_capability") if isinstance(evidence.get("network_capability"), dict) else None
+    if not isinstance(capability, dict):
+        return False
+    authorized = str(capability.get("authorized_mode") or "").strip().lower()
+    contract_mode = str(capability.get("contract_mode") or expected).strip().lower()
+    if contract_mode != expected or authorized not in _NETWORK_RANK:
+        return False
+    if _NETWORK_RANK[authorized] > _NETWORK_RANK[expected]:
+        return False
+    if expected == "native":
+        isolation = result.get("network_isolation")
+        if not isinstance(isolation, dict):
+            isolation = evidence.get("network_isolation") if isinstance(evidence.get("network_isolation"), dict) else None
+        if not isinstance(isolation, dict) or isolation.get("enforced") is not True:
+            return False
+    return True
+
+
 def verify_execution(result: dict[str, Any]) -> VerificationResult:
     """Verify completion from independent execution records, not model claims alone."""
     valid_result = isinstance(result, dict)
@@ -95,6 +125,7 @@ def verify_execution(result: dict[str, Any]) -> VerificationResult:
         "security_clean": observed_security_violations == 0 and (
             not isinstance(evidence, dict) or int(evidence.get("security_violations", 0)) == 0
         ),
+        "network_capability_compliant": _network_capability_compliant(result, evidence if isinstance(evidence, dict) else {}),
     }
     blockers = [name for name, passed in checks.items() if not passed]
     return VerificationResult(verified=not blockers, checks=checks, blockers=blockers)
