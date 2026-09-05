@@ -56,9 +56,22 @@ class RecoverySweep:
             execution_id = stale_lease.get("execution_id") if stale_lease else task.get("metadata", {}).get("execution_id")
             attempt = self.execution_ledger.get(str(execution_id)) if execution_id else None
 
+            # Legacy tasks may predate the execution ledger and have no durable
+            # execution identity. Establish a recovery-owned attempt before
+            # failing them, so the terminal transition remains ledger-fenced.
+            if execution_id is None:
+                current_attempt = self.execution_ledger.current(task_id)
+                if current_attempt is not None:
+                    execution_id = str(current_attempt["execution_id"])
+                    attempt = current_attempt
+                else:
+                    attempt = self.execution_ledger.begin(task_id, "recovery-sweep", now=current)
+                    execution_id = str(attempt["execution_id"])
+
             metadata = dict(task.get("metadata", {}))
             metadata.update(
                 {
+                    "execution_id": execution_id,
                     "recovery_required": True,
                     "automatic_retry_suppressed": True,
                     "orphaned_execution": True,
@@ -67,16 +80,13 @@ class RecoverySweep:
                     "recovered_at": current,
                 }
             )
-            if execution_id:
-                failed = self.execution_ledger.fail_orphaned_if_current(
-                    task_id,
-                    str(execution_id),
-                    error="Execution owner disappeared or lease expired; automatic replay is unsafe.",
-                    metadata=metadata,
-                    now=current,
-                )
-            else:
-                failed = False
+            failed = self.execution_ledger.fail_orphaned_if_current(
+                task_id,
+                str(execution_id),
+                error="Execution owner disappeared or lease expired; automatic replay is unsafe.",
+                metadata=metadata,
+                now=current,
+            )
 
             if failed:
                 actions.append(
