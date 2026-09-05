@@ -1,9 +1,4 @@
-"""Process-level controls for terminal tool execution.
-
-This module provides process-group isolation, bounded resources, bounded streaming
-output capture, and native host containment where available. It is still not a
-complete filesystem or network sandbox.
-"""
+"""Process-level controls for terminal tool execution."""
 
 from __future__ import annotations
 
@@ -14,6 +9,7 @@ import threading
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
+from agent_core.network_sandbox import NetworkSandbox
 from agent_core.os_isolation import WindowsJobIsolation, native_isolation_mode
 
 
@@ -37,12 +33,16 @@ class ProcessLimits:
 class IsolatedProcessRunner:
     """Run one process in its own process group with bounded resources."""
 
-    def __init__(self, *, environment: Mapping[str, str]) -> None:
+    def __init__(self, *, environment: Mapping[str, str], network_sandbox: NetworkSandbox | None = None) -> None:
         self.environment = dict(environment)
+        self.network_sandbox = network_sandbox or NetworkSandbox()
 
     @staticmethod
     def isolation_mode() -> str:
         return native_isolation_mode()
+
+    def network_isolation(self) -> dict[str, object]:
+        return self.network_sandbox.snapshot()
 
     @staticmethod
     def _creationflags() -> int:
@@ -93,7 +93,6 @@ class IsolatedProcessRunner:
 
     @staticmethod
     def _capture_stream(stream, limit: int, chunks: list[str], size: list[int], truncated: list[bool]) -> None:
-        """Drain a pipe continuously while retaining only the configured ceiling."""
         while True:
             chunk = stream.read(4096)
             if not chunk:
@@ -115,8 +114,9 @@ class IsolatedProcessRunner:
         cwd: str,
         limits: ProcessLimits,
     ) -> tuple[str, str, int, bool]:
+        wrapped_args = self.network_sandbox.wrap(args)
         process = subprocess.Popen(
-            list(args),
+            wrapped_args,
             shell=False,
             cwd=cwd,
             env=self.environment,
@@ -147,16 +147,8 @@ class IsolatedProcessRunner:
         stdout_truncated = [False]
         stderr_truncated = [False]
         readers = (
-            threading.Thread(
-                target=self._capture_stream,
-                args=(process.stdout, limits.max_output_chars, stdout_chunks, stdout_size, stdout_truncated),
-                daemon=True,
-            ),
-            threading.Thread(
-                target=self._capture_stream,
-                args=(process.stderr, limits.max_output_chars, stderr_chunks, stderr_size, stderr_truncated),
-                daemon=True,
-            ),
+            threading.Thread(target=self._capture_stream, args=(process.stdout, limits.max_output_chars, stdout_chunks, stdout_size, stdout_truncated), daemon=True),
+            threading.Thread(target=self._capture_stream, args=(process.stderr, limits.max_output_chars, stderr_chunks, stderr_size, stderr_truncated), daemon=True),
         )
         for reader in readers:
             reader.start()
