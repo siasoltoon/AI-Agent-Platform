@@ -56,6 +56,8 @@ class MissionAcceptanceGate:
                     if isinstance(result.get("tool_records"), list)
                 )
             )
+        if contract is not None and "network_access" in contract.snapshot():
+            checks["network_capability_compliant"] = verification.checks.get("network_capability_compliant", False)
 
         reasons = [name for name, passed in checks.items() if not passed]
         return AcceptanceResult(
