@@ -24,6 +24,8 @@ Each execution is protected by a durable execution ID and monotonic fencing toke
 
 Mutation-capable tools use a durable side-effect ledger with task-scoped idempotency keys, request-hash validation and ownership fencing. Committed results can be replayed idempotently; ambiguous and failed side effects are never blindly replayed.
 
+For remote PC workers, execution authority remains on the controller. The remote worker entrypoint `worker_system.remote_worker` proxies fence checks and the durable side-effect ledger to the controller over HTTP, so the worker does not depend on a local copy of `data/tasks.db` for authoritative fencing.
+
 The reliable execution layer gives each worker execution a bounded six-attempt self-repair budget. A recovery attempt receives the original mission, the previous failure and recent tool observations, then continues from the existing workspace instead of restarting blindly. Durable task retries are also bounded at five retries, so transient worker/model failures can recover without requiring the user to resubmit the task.
 
 ## Live worker telemetry
@@ -32,9 +34,17 @@ The PC worker exposes a live resource snapshot from `GET /health`, including CPU
 
 ## Production configuration
 
-Copy `.env.example` to `.env` and set deployment-specific values. The API supports explicit `ENVIRONMENT`, `API_HOST`, `API_PORT`, `CORS_ORIGINS` and `LOG_LEVEL` settings. Wildcard CORS is rejected by configuration validation so production deployments must declare their trusted browser origins.
+Copy `.env.example` to `.env` and set deployment-specific values. Wildcard CORS is rejected by configuration validation so production deployments must declare their trusted browser origins.
 
-The current architecture keeps heavy agent execution on the configured PC worker. The controller remains responsible for task contracts, routing, persistence, durable task lifecycle and health endpoints.
+The current architecture keeps heavy agent execution on the configured PC worker. The controller remains responsible for task contracts, routing, persistence, durable task lifecycle, execution authority and health endpoints.
+
+For a remote PC worker, set `EXECUTION_AUTHORITY_URL` to the controller's LAN URL, for example `http://192.168.1.2:8000`, and run:
+
+```text
+python -m uvicorn worker_system.remote_worker:app --host 0.0.0.0 --port 8001
+```
+
+If `EXECUTION_AUTHORITY_TOKEN` is set, configure the same secret on both controller and worker. Keep the controller's port reachable from the worker but do not expose the internal execution-authority endpoints publicly.
 
 ## Health endpoints
 
